@@ -40,6 +40,29 @@ jobs:
           echo "Base ref: ${{ github.base_ref }}"
           echo "Head ref: ${{ github.head_ref }}"
 
+  # Early check: verify dev branch includes all main commits
+  main-sync:
+    name: Main Sync Check
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/dev'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify dev is up to date with main
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor origin/main HEAD; then
+            echo "::error::dev branch is NOT up to date with main!"
+            echo "::error::Please rebase dev onto main: git fetch origin main && git rebase origin/main"
+            echo ""
+            echo "Commits on main not in dev:"
+            git log HEAD..origin/main --oneline
+            exit 1
+          fi
+          echo "dev branch is up to date with main"
+
   fmt:
     name: Format Check
     runs-on: windows-latest
@@ -127,13 +150,14 @@ jobs:
   # Summary job that depends on all checks including branch-check
   ci-success:
     name: CI Success
-    needs: [branch-check, fmt, clippy, build, test, e2e]
+    needs: [branch-check, main-sync, fmt, clippy, build, test, e2e]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
           if [[ "${{ needs.branch-check.result }}" != "success" ]] || \
+             [[ "${{ needs.main-sync.result }}" != "success" && "${{ needs.main-sync.result }}" != "skipped" ]] || \
              [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
