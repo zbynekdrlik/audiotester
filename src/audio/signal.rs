@@ -55,19 +55,42 @@ impl MlsGenerator {
         }
     }
 
-    /// Generate the MLS sequence using LFSR
+    /// Generate the MLS sequence using LFSR with proper primitive polynomials
     fn generate_sequence(order: u32, length: usize) -> Vec<f32> {
         let mut sequence = Vec::with_capacity(length);
         let mut lfsr: u32 = 1; // Initial state (non-zero)
+
+        // Tap positions for maximal length sequences (Fibonacci LFSR)
+        // These are the bit positions to XOR for feedback (0-indexed)
+        // Source: https://en.wikipedia.org/wiki/Linear-feedback_shift_register
+        let taps: &[u32] = match order {
+            2 => &[1, 0],
+            3 => &[2, 1],
+            4 => &[3, 2],
+            5 => &[4, 2],
+            6 => &[5, 4],
+            7 => &[6, 5],
+            8 => &[7, 5, 4, 3],
+            9 => &[8, 4],
+            10 => &[9, 6],
+            11 => &[10, 8],
+            12 => &[11, 10, 9, 3],
+            13 => &[12, 11, 10, 7],
+            14 => &[13, 12, 11, 1],
+            15 => &[14, 13],
+            _ => &[1, 0], // Fallback
+        };
 
         for _ in 0..length {
             // Output is the LSB
             let bit = lfsr & 1;
             sequence.push(if bit == 1 { 1.0 } else { -1.0 });
 
-            // Calculate feedback based on primitive polynomial
-            // For order 15: x^15 + x^14 + 1
-            let feedback = ((lfsr >> 14) ^ (lfsr >> 13)) & 1;
+            // Calculate feedback by XORing all tap positions
+            let mut feedback = 0u32;
+            for &tap in taps {
+                feedback ^= (lfsr >> tap) & 1;
+            }
 
             // Shift right and insert feedback at MSB
             lfsr = (lfsr >> 1) | (feedback << (order - 1));
