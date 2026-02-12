@@ -14,6 +14,12 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 - **Test machines are for TESTING ONLY** - never install dev tools or set up dev environments on them
 - Use idiomatic Rust patterns and maintain backward compatibility
 - Keep solutions simple and focused - avoid over-engineering
+- **ALWAYS provide a mergeable PR URL** - After completing work, the agent MUST:
+  1. Push changes to `dev` branch
+  2. Wait for CI to pass (check GitHub Actions)
+  3. Create PR from `dev` to `main`
+  4. Provide the PR URL to the user
+  5. PR must be GREEN (CI passing) and ready to merge
 
 ## Code Standards
 
