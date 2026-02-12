@@ -124,11 +124,14 @@ Audiotester saves settings to `%APPDATA%\Audiotester\config.json`:
 
 ## Contributing
 
+**Branch Policy**: Only two branches exist - `main` and `dev`. No feature branches.
+
 1. Fork the repository
-2. Create a feature branch from `dev`
+2. Work directly on the `dev` branch (no feature branches)
 3. Write tests (E2E tests required for new features)
 4. Ensure `cargo fmt` and `cargo clippy` pass
-5. Open a PR to `dev`
+5. Commit and push to `dev`
+6. Open a PR from `dev` to `main` for releases
 
 ## License
 

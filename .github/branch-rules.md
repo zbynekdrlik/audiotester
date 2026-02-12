@@ -1,87 +1,79 @@
-# Branch Protection Rules
+# Branch Policy
 
-This document describes the branch protection configuration for the audiotester repository.
+## CRITICAL: Two Branches Only
 
-## Main Branch (`main`)
+This repository uses a **strict two-branch policy**. Only these branches are allowed:
 
-The `main` branch is protected with the following rules:
+| Branch | Purpose                        |
+| ------ | ------------------------------ |
+| `main` | Production releases, protected |
+| `dev`  | All development work           |
 
-### Required Status Checks
-
-Before merging to `main`, all of these checks must pass:
-
-- `fmt` - Code formatting check (`cargo fmt --check`)
-- `clippy` - Linting check (`cargo clippy -- -D warnings`)
-- `build` - Debug and release builds
-- `test` - Unit and integration tests
-- `e2e` - End-to-end tests
-
-### Merge Requirements
-
-- **Require pull request before merging**: Direct pushes to `main` are not allowed
-- **Require linear history**: Force merges and merge commits that don't maintain linear history are rejected
-- **Require branches to be up to date**: The PR branch must be up to date with `main` before merging
-- **Restrict merges to `dev` branch only**: Only PRs from the `dev` branch can be merged to `main`
-
-### Additional Protections
-
-- **Do not allow force pushes**: History cannot be rewritten
-- **Do not allow deletions**: The `main` branch cannot be deleted
-
-## Dev Branch (`dev`)
-
-The `dev` branch has lighter protection:
-
-### Required Status Checks
-
-- `fmt` - Code formatting check
-- `clippy` - Linting check
-- `build` - Build check
-- `test` - Unit and integration tests
-- `e2e` - End-to-end tests
-
-### Merge Requirements
-
-- **Require pull request before merging**: Direct pushes are not allowed
-- Feature branches should be merged to `dev` via PR
+**NO OTHER BRANCHES ARE PERMITTED** - no `feature/*`, `bugfix/*`, `hotfix/*`, or any other branches.
 
 ## Workflow
 
 ```
-feature/xxx ─── PR ───► dev ─── PR ───► main
-                         │
-bugfix/xxx ────── PR ────┘
+dev ─── commit ─── commit ─── commit ─── PR ───► main
+                                          │
+                                    (release tag)
 ```
 
-1. Create feature branches from `dev`
-2. Open PR to merge feature branch into `dev`
-3. All CI checks must pass
-4. After review, merge to `dev`
-5. Periodically, open PR from `dev` to `main` for release
-6. All CI checks must pass on the `dev` → `main` PR
-7. Merge to `main` triggers release workflow (if tagged)
+1. All development happens directly on `dev`
+2. Commit and push to `dev` branch
+3. When ready for release, open PR from `dev` to `main`
+4. CI checks must pass
+5. Merge to `main` and tag for release
 
-## Setting Up Branch Protection
+## Main Branch (`main`)
 
-To configure these rules via GitHub CLI:
+### Protection Rules
 
-```bash
-# Main branch protection
-gh api repos/{owner}/{repo}/branches/main/protection -X PUT \
-  -H "Accept: application/vnd.github+json" \
-  -f required_status_checks='{"strict":true,"contexts":["fmt","clippy","build","test","e2e"]}' \
-  -f enforce_admins=true \
-  -f required_pull_request_reviews='{"required_approving_review_count":0}' \
-  -f restrictions=null \
-  -f allow_force_pushes=false \
-  -f allow_deletions=false \
-  -f required_linear_history=true
+- **Require pull request before merging**: Direct pushes are blocked
+- **Only accept PRs from `dev`**: PRs from any other branch will fail CI
+- **Require status checks**: fmt, clippy, build, test, e2e, branch-check
+- **Require linear history**: Clean commit history
+- **No force pushes**: History cannot be rewritten
+- **No deletions**: Branch cannot be deleted
 
-# Dev branch protection
-gh api repos/{owner}/{repo}/branches/dev/protection -X PUT \
-  -H "Accept: application/vnd.github+json" \
-  -f required_status_checks='{"strict":true,"contexts":["fmt","clippy","build","test","e2e"]}' \
-  -f enforce_admins=false \
-  -f required_pull_request_reviews=null \
-  -f restrictions=null
+## Dev Branch (`dev`)
+
+### Rules
+
+- All commits go here directly
+- Push access for contributors
+- CI runs on every push
+- This is the ONLY branch you work on
+
+## CI Enforcement
+
+The `branch-check` job in CI enforces this policy:
+
+```yaml
+# Fails if PR to main is not from dev
+- name: Verify PR source branch
+  if: github.event_name == 'pull_request' && github.base_ref == 'main'
+  run: |
+    if [[ "${{ github.head_ref }}" != "dev" ]]; then
+      echo "ERROR: PRs to main must come from dev branch only!"
+      exit 1
+    fi
 ```
+
+## Why This Policy?
+
+1. **Simplicity**: No branch management overhead
+2. **Single source of truth**: `dev` always has latest code
+3. **Clean releases**: `main` only gets tested, reviewed code
+4. **No stale branches**: Only 2 branches to maintain
+5. **Clear workflow**: No confusion about where to work
+
+## For AI Agents
+
+**IMPORTANT**: When working on this codebase:
+
+1. NEVER suggest creating feature branches
+2. ALWAYS work directly on `dev`
+3. NEVER push to `main` directly
+4. Use `git checkout dev && git pull` before starting work
+5. Commit and push to `dev` when done

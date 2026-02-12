@@ -8,7 +8,8 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 
 - Act as a highly skilled Rust/ASIO developer with expertise in real-time audio processing
 - Prioritize E2E tests for every new feature - tests are the highest priority
-- Follow strict PR workflow: all changes go through `dev` branch, then PR to `main`
+- **NEVER create feature branches** - only `main` and `dev` branches exist
+- **ALL work happens directly on `dev` branch** - commit and push to `dev`
 - Use idiomatic Rust patterns and maintain backward compatibility
 - Keep solutions simple and focused - avoid over-engineering
 
@@ -72,11 +73,32 @@ $env:CPAL_ASIO_DIR = "C:\path\to\asiosdk"
 
 ## Git Workflow
 
-1. Never push directly to `main`
-2. Create feature branches from `dev`
-3. Open PR from feature branch to `dev`
-4. After review, merge to `dev`
-5. Periodically, PR from `dev` to `main` (release)
+**CRITICAL: Only two branches are allowed in this repository: `main` and `dev`**
+
+### Branch Policy (STRICTLY ENFORCED)
+
+- **`main`** - Production branch, protected, only accepts PRs from `dev`
+- **`dev`** - Development branch, ALL work happens here directly
+
+### Rules
+
+1. **NEVER create feature branches** - No `feature/*`, `bugfix/*`, or any other branches
+2. **NEVER push directly to `main`** - Only PRs from `dev` are allowed
+3. **ALL development happens on `dev`** - Commit directly to `dev` branch
+4. **PR from `dev` to `main`** for releases only
+
+### Workflow
+
+```
+dev ─── commit ─── commit ─── commit ─── PR ───► main (release)
+```
+
+### CI Enforcement
+
+The CI workflow will FAIL if:
+
+- A PR is opened from any branch other than `dev` to `main`
+- Any branch other than `main` or `dev` is detected
 
 ## Testing Strategy
 
@@ -128,13 +150,14 @@ latency_ms = latency_samples / sample_rate * 1000
 
 ### Adding a New Feature
 
-1. Create feature branch: `git checkout -b feature/name dev`
+1. Ensure you are on `dev` branch: `git checkout dev && git pull`
 2. Write E2E tests first
 3. Implement feature
 4. Run `cargo fmt && cargo clippy -- -D warnings`
 5. Run `cargo test`
-6. Commit with descriptive message
-7. Open PR to `dev`
+6. Commit with descriptive message: `git commit -m "Add feature X"`
+7. Push to dev: `git push origin dev`
+8. When ready for release, open PR from `dev` to `main`
 
 ### Debugging Audio Issues
 

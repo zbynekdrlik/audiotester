@@ -11,6 +11,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # CRITICAL: Enforce two-branch policy
+  branch-check:
+    name: Branch Policy Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify PR source branch
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        run: |
+          if [[ "${{ github.head_ref }}" != "dev" ]]; then
+            echo "::error::BRANCH POLICY VIOLATION!"
+            echo "::error::PRs to 'main' must come from 'dev' branch ONLY."
+            echo "::error::This repository only allows two branches: main and dev."
+            echo "::error::Found PR from: ${{ github.head_ref }}"
+            echo ""
+            echo "Please:"
+            echo "1. Close this PR"
+            echo "2. Merge your changes to 'dev' branch"
+            echo "3. Open a new PR from 'dev' to 'main'"
+            exit 1
+          fi
+          echo "Branch policy check passed: PR is from 'dev' to 'main'"
+
+      - name: Confirm branch policy
+        run: |
+          echo "Branch policy: Only 'main' and 'dev' branches are allowed"
+          echo "Current event: ${{ github.event_name }}"
+          echo "Base ref: ${{ github.base_ref }}"
+          echo "Head ref: ${{ github.head_ref }}"
+
   fmt:
     name: Format Check
     runs-on: windows-latest
@@ -95,16 +124,17 @@ jobs:
       - name: Run E2E tests
         run: cargo test --test 'e2e_*' --verbose
 
-  # Summary job that depends on all checks
+  # Summary job that depends on all checks including branch-check
   ci-success:
     name: CI Success
-    needs: [fmt, clippy, build, test, e2e]
+    needs: [branch-check, fmt, clippy, build, test, e2e]
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Check all jobs passed
         run: |
-          if [[ "${{ needs.fmt.result }}" != "success" ]] || \
+          if [[ "${{ needs.branch-check.result }}" != "success" ]] || \
+             [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
