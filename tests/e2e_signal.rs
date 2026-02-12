@@ -211,7 +211,7 @@ fn test_mls_fill_buffer() {
 #[test]
 fn test_mls_position() {
     let mut gen = MlsGenerator::new(10);
-    let length = gen.length();
+    let length = gen.length(); // 1023
 
     assert_eq!(gen.position(), 0, "Initial position should be 0");
 
@@ -219,10 +219,13 @@ fn test_mls_position() {
         gen.next_sample();
         assert_eq!(gen.position(), i, "Position should track samples");
     }
+    // After loop: position = 99
 
-    // Test wraparound
-    for _ in 0..(length - 100 + 1) {
+    // Test wraparound: advance to complete one full period + 1
+    // Currently at 99, need (length - 99) more to reach end, then 1 more to wrap
+    for _ in 0..(length - 99 + 1) {
         gen.next_sample();
     }
+    // After 99 + (1023 - 99 + 1) = 1024 samples, position = 1024 % 1023 = 1
     assert_eq!(gen.position(), 1, "Position should wrap around");
 }
