@@ -59,12 +59,7 @@ windows = { version = "0.58", features = [
 [dev-dependencies]
 # Testing utilities
 approx = "0.5"
-criterion = "0.5"
 tempfile = "3.14"
-
-[[bench]]
-name = "correlation"
-harness = false
 
 [features]
 default = []
