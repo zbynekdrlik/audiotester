@@ -229,7 +229,7 @@ impl TrayManager {
             } else {
                 "Start Monitoring"
             };
-            let _ = toggle_item.set_text(text);
+            toggle_item.set_text(text);
         }
     }
 
@@ -256,7 +256,7 @@ impl TrayManager {
     pub fn set_status_text(&mut self, text: &str) -> Result<(), TrayError> {
         #[cfg(windows)]
         if let Some(ref status_item) = self.status_item {
-            let _ = status_item.set_text(text);
+            status_item.set_text(text);
         }
         let _ = text;
         Ok(())
