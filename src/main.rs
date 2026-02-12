@@ -6,7 +6,7 @@ use anyhow::Result;
 use audiotester::audio::engine::AudioEngine;
 use std::io::{self, Write};
 use std::time::Duration;
-use tracing::error;
+use tracing::{error, info};
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -28,8 +28,13 @@ fn main() -> Result<()> {
     // Parse command line arguments
     let args: Vec<String> = std::env::args().collect();
 
-    if args.len() > 1 {
-        match args[1].as_str() {
+    // Parse options
+    let mut device_name: Option<String> = None;
+    let mut sample_rate: Option<u32> = None;
+    let mut i = 1;
+
+    while i < args.len() {
+        match args[i].as_str() {
             "--list" | "-l" => {
                 list_devices()?;
                 return Ok(());
@@ -43,19 +48,46 @@ fn main() -> Result<()> {
                 return Ok(());
             }
             "--device" | "-d" => {
-                if args.len() < 3 {
+                if i + 1 >= args.len() {
                     eprintln!("Error: --device requires a device name");
                     return Ok(());
                 }
-                run_with_device(&args[2])?;
-                return Ok(());
+                device_name = Some(args[i + 1].clone());
+                i += 2;
+                continue;
             }
-            _ => {
-                eprintln!("Unknown argument: {}", args[1]);
+            "--sample-rate" | "-r" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --sample-rate requires a value");
+                    return Ok(());
+                }
+                sample_rate = args[i + 1].parse().ok();
+                if sample_rate.is_none() {
+                    eprintln!("Error: Invalid sample rate: {}", args[i + 1]);
+                    return Ok(());
+                }
+                i += 2;
+                continue;
+            }
+            arg if arg.starts_with('-') => {
+                eprintln!("Unknown argument: {}", arg);
                 print_help();
                 return Ok(());
             }
+            _ => {
+                // Positional argument - treat as device name if not set
+                if device_name.is_none() {
+                    device_name = Some(args[i].clone());
+                }
+            }
         }
+        i += 1;
+    }
+
+    // If device specified via command line, run with it
+    if let Some(dev) = device_name {
+        run_with_device(&dev, sample_rate)?;
+        return Ok(());
     }
 
     // Interactive mode
@@ -66,10 +98,15 @@ fn print_help() {
     println!("Usage: audiotester [OPTIONS]");
     println!();
     println!("Options:");
-    println!("  -l, --list          List available ASIO devices");
-    println!("  -d, --device NAME   Start monitoring with specified device");
-    println!("  -v, --version       Show version");
-    println!("  -h, --help          Show this help");
+    println!("  -l, --list              List available ASIO devices");
+    println!("  -d, --device NAME       Start monitoring with specified device");
+    println!("  -r, --sample-rate RATE  Set sample rate (default: device default)");
+    println!("  -v, --version           Show version");
+    println!("  -h, --help              Show this help");
+    println!();
+    println!("Examples:");
+    println!("  audiotester -d \"VB-Matrix VASIO-8\" -r 96000");
+    println!("  audiotester --list");
     println!();
     println!("Without arguments, starts in interactive mode.");
 }
@@ -115,11 +152,19 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-fn run_with_device(device_name: &str) -> Result<()> {
+fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
     println!("Starting with device: {}", device_name);
+    if let Some(rate) = sample_rate {
+        println!("Sample rate: {} Hz", rate);
+    }
     println!();
 
     let mut engine = AudioEngine::new();
+
+    // Set sample rate if specified
+    if let Some(rate) = sample_rate {
+        engine.set_sample_rate(rate);
+    }
 
     // Select device
     if let Err(e) = engine.select_device(device_name) {
@@ -137,6 +182,8 @@ fn run_with_device(device_name: &str) -> Result<()> {
         return Ok(());
     }
 
+    info!("Output callback active - sending MLS signal on channel 1");
+
     println!("Monitoring started. Press Ctrl+C to stop.");
     println!();
     println!("Status:");
@@ -152,7 +199,19 @@ fn run_with_device(device_name: &str) -> Result<()> {
 
     // Main monitoring loop
     let mut last_status = String::new();
+    let mut iteration = 0u32;
     while running.load(std::sync::atomic::Ordering::SeqCst) {
+        let (out_samples, in_samples) = engine.sample_counts();
+
+        // Every 10 iterations, show sample counts for debugging
+        if iteration % 10 == 0 && iteration > 0 {
+            info!(
+                "Audio I/O: {} samples out, {} samples in",
+                out_samples, in_samples
+            );
+        }
+        iteration += 1;
+
         if let Some(result) = engine.analyze() {
             let status = if result.is_healthy {
                 "OK"
@@ -163,10 +222,12 @@ fn run_with_device(device_name: &str) -> Result<()> {
             };
 
             let status_line = format!(
-                "Latency: {:>6.2}ms | Lost: {:>4} | Confidence: {:>5.1}% | Status: {}",
+                "Latency: {:>6.2}ms | Lost: {:>4} | Confidence: {:>5.1}% | Out: {:>8} | In: {:>8} | Status: {}",
                 result.latency_ms,
                 result.lost_samples,
                 result.confidence * 100.0,
+                out_samples,
+                in_samples,
                 status
             );
 
@@ -219,5 +280,5 @@ fn interactive_mode() -> Result<()> {
     };
 
     let device_name = &devices[device_num - 1].name;
-    run_with_device(device_name)
+    run_with_device(device_name, None) // Use default sample rate (96kHz)
 }
