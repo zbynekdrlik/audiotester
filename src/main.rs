@@ -6,7 +6,7 @@ use anyhow::Result;
 use audiotester::audio::engine::AudioEngine;
 use std::io::{self, Write};
 use std::time::Duration;
-use tracing::{error, info, warn};
+use tracing::error;
 
 fn main() -> Result<()> {
     // Initialize logging
