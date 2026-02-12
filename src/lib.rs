@@ -14,8 +14,8 @@ pub use stats::store::StatsStore;
 /// Application version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Default sample rate for audio processing
-pub const DEFAULT_SAMPLE_RATE: u32 = 48000;
+/// Default sample rate for audio processing (96kHz for professional setups)
+pub const DEFAULT_SAMPLE_RATE: u32 = 96000;
 
 /// MLS sequence order (2^ORDER - 1 samples)
 pub const MLS_ORDER: u32 = 15;

@@ -80,6 +80,10 @@ struct SharedState {
     last_result: Mutex<Option<AnalysisResult>>,
     /// Running flag
     running: AtomicBool,
+    /// Counter for output samples (debug)
+    output_samples: std::sync::atomic::AtomicUsize,
+    /// Counter for input samples (debug)
+    input_samples: std::sync::atomic::AtomicUsize,
 }
 
 /// ASIO audio engine for managing audio streams
@@ -120,6 +124,11 @@ impl AudioEngine {
     /// Get configured sample rate
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Set sample rate (must be called before start)
+    pub fn set_sample_rate(&mut self, rate: u32) {
+        self.sample_rate = rate;
     }
 
     /// Get the ASIO host
@@ -235,16 +244,17 @@ impl AudioEngine {
             .as_ref()
             .ok_or_else(|| anyhow!("No device selected"))?;
 
-        // Get default configs
-        let input_config = device
+        // Get default configs for validation
+        let _input_config = device
             .default_input_config()
             .context("Failed to get input config")?;
         let _output_config = device
             .default_output_config()
             .context("Failed to get output config")?;
 
-        // Use the device's sample rate
-        self.sample_rate = input_config.sample_rate().0;
+        // Use configured sample rate (set via set_sample_rate or default)
+        // Don't override with device default - respect user's setting
+        tracing::info!("Using sample rate: {} Hz", self.sample_rate);
 
         // Create stream config for mono channel 1
         let config = StreamConfig {
@@ -267,6 +277,8 @@ impl AudioEngine {
             analyzer: Mutex::new(analyzer),
             last_result: Mutex::new(None),
             running: AtomicBool::new(true),
+            output_samples: std::sync::atomic::AtomicUsize::new(0),
+            input_samples: std::sync::atomic::AtomicUsize::new(0),
         });
 
         // Create output stream
@@ -277,6 +289,18 @@ impl AudioEngine {
                 if output_state.running.load(Ordering::Relaxed) {
                     if let Ok(mut gen) = output_state.generator.lock() {
                         gen.fill_buffer(data);
+                        // Track output samples for debugging
+                        let prev = output_state
+                            .output_samples
+                            .fetch_add(data.len(), Ordering::Relaxed);
+                        // Log first callback to confirm output is working
+                        if prev == 0 {
+                            tracing::info!(
+                                "Output callback started: {} samples, first value: {:.4}",
+                                data.len(),
+                                data.first().copied().unwrap_or(0.0)
+                            );
+                        }
                     }
                 } else {
                     // Fill with silence when stopped
@@ -301,6 +325,19 @@ impl AudioEngine {
                         // Push samples to ring buffer (drop oldest if full)
                         for &sample in data {
                             let _ = prod.try_push(sample);
+                        }
+                        // Track input samples for debugging
+                        let prev = input_state
+                            .input_samples
+                            .fetch_add(data.len(), Ordering::Relaxed);
+                        // Log first callback to confirm input is working
+                        if prev == 0 {
+                            let max_level = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                            tracing::info!(
+                                "Input callback started: {} samples, max level: {:.4}",
+                                data.len(),
+                                max_level
+                            );
                         }
                     }
                 }
@@ -394,6 +431,19 @@ impl AudioEngine {
             .as_ref()
             .and_then(|s| s.last_result.lock().ok())
             .and_then(|r| r.clone())
+    }
+
+    /// Get sample counts for debugging (output, input)
+    pub fn sample_counts(&self) -> (usize, usize) {
+        self.shared_state
+            .as_ref()
+            .map(|s| {
+                (
+                    s.output_samples.load(Ordering::Relaxed),
+                    s.input_samples.load(Ordering::Relaxed),
+                )
+            })
+            .unwrap_or((0, 0))
     }
 }
 
