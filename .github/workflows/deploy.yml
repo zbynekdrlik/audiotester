@@ -1,0 +1,103 @@
+name: Deploy to Test Machine
+
+on:
+  # Trigger after release is published
+  release:
+    types: [published]
+
+  # Allow manual trigger for testing
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to deploy (e.g., 0.1.0)"
+        required: true
+        type: string
+
+env:
+  DEPLOY_HOST: ${{ secrets.IEM_HOST }}
+  DEPLOY_USER: ${{ secrets.IEM_USER }}
+  DEPLOY_PATH: 'C:\Users\iem\audiotester'
+
+jobs:
+  deploy:
+    name: Deploy to iem.lan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            VERSION="${{ github.event.release.tag_name }}"
+            VERSION="${VERSION#v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+          echo "Deploying version: $VERSION"
+
+      - name: Download release artifact
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          ASSET_NAME="audiotester-${VERSION}-windows-x64.zip"
+          DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${ASSET_NAME}"
+
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L -o release.zip "$DOWNLOAD_URL"
+
+          # Extract
+          unzip release.zip -d release/
+          ls -la release/
+
+      - name: Install SSH client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y sshpass
+
+      - name: Deploy to test machine
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          # Create deploy directory if needed
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "if not exist \"${{ env.DEPLOY_PATH }}\" mkdir \"${{ env.DEPLOY_PATH }}\""
+
+          # Stop any running instance (ignore errors)
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
+
+          # Copy new version
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            release/audiotester.exe \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/audiotester.exe"
+
+          # Copy any additional files (README, etc.)
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            release/README.md \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/" 2>/dev/null || true
+
+          echo "Deployment complete!"
+
+      - name: Verify deployment
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          echo "Verifying deployment..."
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "dir \"${{ env.DEPLOY_PATH }}\" && \"${{ env.DEPLOY_PATH }}\\audiotester.exe\" --version 2>nul || echo 'Version check not implemented yet'"
+
+      - name: Deployment summary
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Target**: ${{ env.DEPLOY_HOST }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Path**: ${{ env.DEPLOY_PATH }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
+          echo "1. SSH to test machine: \`ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "2. Run: \`${{ env.DEPLOY_PATH }}\\audiotester.exe\`" >> $GITHUB_STEP_SUMMARY
+          echo "3. Test with ASIO loopback" >> $GITHUB_STEP_SUMMARY

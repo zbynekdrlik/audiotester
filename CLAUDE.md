@@ -193,10 +193,25 @@ latency_ms = latency_samples / sample_rate * 1000
   - Creates GitHub Release
   - Uploads artifacts
 
+- `deploy.yml` - Runs after release is published:
+  - Downloads release artifact
+  - Deploys to test machine (iem.lan) via SSH
+  - Verifies deployment
+
+### Required GitHub Secrets
+
+For automated deployment to work, these secrets must be configured:
+
+| Secret         | Value     |
+| -------------- | --------- |
+| `IEM_HOST`     | `iem.lan` |
+| `IEM_USER`     | `iem`     |
+| `IEM_PASSWORD` | `iem`     |
+
 ### Workflow
 
 ```
-Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Tag → Release built
+Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Tag → Release → Auto-deploy to iem.lan
 ```
 
 ## Test Machine (iem.lan)
