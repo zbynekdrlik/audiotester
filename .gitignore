@@ -1,0 +1,41 @@
+# Rust/Cargo
+/target/
+Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+*.env
+
+# Build artifacts
+*.exe
+*.dll
+*.pdb
+
+# ASIO SDK (must be downloaded separately)
+asio-sdk/
+ASIOSDK*/
+
+# Logs
+*.log
+logs/
+
+# Test artifacts
+test-output/
+coverage/
+
+# Release artifacts
+dist/
+*.msi
+*.zip
