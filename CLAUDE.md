@@ -10,6 +10,8 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 - Prioritize E2E tests for every new feature - tests are the highest priority
 - **NEVER create feature branches** - only `main` and `dev` branches exist
 - **ALL work happens directly on `dev` branch** - commit and push to `dev`
+- **ALL compilation, testing, and releases happen through GitHub CI/CD** - never compile locally on test machines
+- **Test machines are for TESTING ONLY** - never install dev tools or set up dev environments on them
 - Use idiomatic Rust patterns and maintain backward compatibility
 - Keep solutions simple and focused - avoid over-engineering
 
@@ -171,3 +173,62 @@ latency_ms = latency_samples / sample_rate * 1000
 - UI updates: 60 FPS in stats window
 - Memory: < 50MB typical usage
 - CPU: < 5% during monitoring
+
+## CI/CD Pipeline (CRITICAL)
+
+**ALL compilation, testing, and releases MUST happen through GitHub CI/CD workflows.**
+
+### What CI/CD Does
+
+- `ci.yml` - Runs on every push to `dev` and PRs to `main`:
+  - Format check (`cargo fmt`)
+  - Lint check (`cargo clippy`)
+  - Build (debug + release)
+  - Unit tests
+  - E2E tests
+  - Branch policy enforcement
+
+- `release.yml` - Runs on version tags (`v*`):
+  - Builds Windows release binary
+  - Creates GitHub Release
+  - Uploads artifacts
+
+### Workflow
+
+```
+Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Tag → Release built
+```
+
+## Test Machine (iem.lan)
+
+**This is a TESTING machine ONLY. NEVER set up development environment here.**
+
+| Property | Value                                                 |
+| -------- | ----------------------------------------------------- |
+| Hostname | `iem.lan`                                             |
+| Username | `iem`                                                 |
+| Password | `iem`                                                 |
+| Purpose  | **Testing compiled releases with real ASIO hardware** |
+
+### What To Do On Test Machine
+
+- Download releases from GitHub
+- Run compiled `audiotester.exe`
+- Test with real ASIO audio loopback
+- Report issues back
+
+### What NEVER To Do On Test Machine
+
+- Install Rust or development tools
+- Compile code
+- Set up development environment
+- Clone repositories for development
+
+### Testing Workflow
+
+1. CI/CD builds release on GitHub
+2. Download release artifact from GitHub
+3. Copy to test machine: `scp audiotester.exe iem@iem.lan:~/`
+4. SSH and run: `ssh iem@iem.lan` then `.\audiotester.exe`
+5. Test with real ASIO loopback
+6. Report results
