@@ -7,7 +7,7 @@
 
 use crate::audio::analyzer::{AnalysisResult, Analyzer};
 use crate::audio::signal::MlsGenerator;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
@@ -244,17 +244,48 @@ impl AudioEngine {
             .as_ref()
             .ok_or_else(|| anyhow!("No device selected"))?;
 
-        // Get default configs for validation
-        let _input_config = device
-            .default_input_config()
-            .context("Failed to get input config")?;
-        let _output_config = device
-            .default_output_config()
-            .context("Failed to get output config")?;
+        // Get device's default output config - this tells us what sample rate the device supports
+        let default_output = device.default_output_config();
+        let default_input = device.default_input_config();
 
-        // Use configured sample rate (set via set_sample_rate or default)
-        // Don't override with device default - respect user's setting
-        tracing::info!("Using sample rate: {} Hz", self.sample_rate);
+        // Log what the device reports
+        tracing::info!(
+            "Device default output config: {:?}",
+            default_output
+                .as_ref()
+                .map(|c| (c.sample_rate().0, c.channels()))
+        );
+        tracing::info!(
+            "Device default input config: {:?}",
+            default_input
+                .as_ref()
+                .map(|c| (c.sample_rate().0, c.channels()))
+        );
+
+        // Determine sample rate to use:
+        // 1. If device reports a default, use that (ASIO devices often require this)
+        // 2. Otherwise use our configured rate
+        let actual_sample_rate = if let Ok(ref cfg) = default_output {
+            let device_rate = cfg.sample_rate().0;
+            if device_rate > 0 {
+                tracing::info!("Using device's reported sample rate: {} Hz", device_rate);
+                device_rate
+            } else {
+                tracing::info!(
+                    "Device reports 0 Hz, using configured: {} Hz",
+                    self.sample_rate
+                );
+                self.sample_rate
+            }
+        } else {
+            tracing::info!(
+                "No device config, using configured: {} Hz",
+                self.sample_rate
+            );
+            self.sample_rate
+        };
+
+        self.sample_rate = actual_sample_rate;
 
         // Create stream config for mono channel 1
         let config = StreamConfig {
