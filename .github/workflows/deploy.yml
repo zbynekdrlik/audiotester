@@ -1,11 +1,7 @@
-name: Deploy to Test Machine
+name: Manual Deploy
 
 on:
-  # Trigger after release is published
-  release:
-    types: [published]
-
-  # Allow manual trigger for testing
+  # Manual trigger only (auto-release.yml handles automatic deploys)
   workflow_dispatch:
     inputs:
       version:

@@ -20,13 +20,10 @@ Windows ASIO audio testing application for monitoring professional audio paths (
   3. Create PR from `dev` to `main`
   4. Provide the PR URL to the user
   5. PR must be GREEN (CI passing) and ready to merge
-- **AUTOMATIC VERSION BUMP AND RELEASE** - After PR is merged to `main`, the agent MUST:
-  1. Get the latest version tag: `git tag -l 'v*' | sort -V | tail -1`
-  2. Increment patch version (e.g., v0.1.2 → v0.1.3)
-  3. Create and push the new tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
-  4. This triggers the release workflow automatically
-  5. Monitor the release and deploy workflows until completion
-  6. Report the deployed version to the user
+- **VERSION, RELEASE, AND DEPLOY ARE FULLY AUTOMATIC** - After PR merge to `main`:
+  - `auto-release.yml` handles everything: version bump → build → release → deploy
+  - Agent does NOT need to manually create tags or trigger workflows
+  - Agent should monitor the auto-release workflow and report result to user
 
 ## Code Standards
 
@@ -201,15 +198,14 @@ latency_ms = latency_samples / sample_rate * 1000
   - E2E tests
   - Branch policy enforcement
 
-- `release.yml` - Runs on version tags (`v*`):
+- `auto-release.yml` - Runs automatically on push to `main` (after PR merge):
+  - Determines next version (auto-increments patch from latest tag)
   - Builds Windows release binary
-  - Creates GitHub Release
-  - Uploads artifacts
+  - Creates git tag and GitHub Release
+  - Deploys to test machine (iem.lan) via self-hosted runner
 
-- `deploy.yml` - Runs after release is published:
-  - Downloads release artifact
-  - Deploys to test machine (iem.lan) via SSH
-  - Verifies deployment
+- `deploy.yml` - Manual re-deploy only (`workflow_dispatch`):
+  - Re-deploys a specific version to iem.lan
 
 ### Required GitHub Secrets
 
@@ -224,7 +220,7 @@ For automated deployment to work, these secrets must be configured:
 ### Workflow
 
 ```
-Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Tag → Release → Auto-deploy to iem.lan
+Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Auto version bump → Build → Release → Deploy to iem.lan
 ```
 
 ## Test Machine (iem.lan)
