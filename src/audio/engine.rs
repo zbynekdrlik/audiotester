@@ -7,7 +7,7 @@
 
 use crate::audio::analyzer::{AnalysisResult, Analyzer};
 use crate::audio::signal::MlsGenerator;
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
