@@ -20,6 +20,13 @@ Windows ASIO audio testing application for monitoring professional audio paths (
   3. Create PR from `dev` to `main`
   4. Provide the PR URL to the user
   5. PR must be GREEN (CI passing) and ready to merge
+- **AUTOMATIC VERSION BUMP AND RELEASE** - After PR is merged to `main`, the agent MUST:
+  1. Get the latest version tag: `git tag -l 'v*' | sort -V | tail -1`
+  2. Increment patch version (e.g., v0.1.2 → v0.1.3)
+  3. Create and push the new tag: `git tag vX.Y.Z && git push origin vX.Y.Z`
+  4. This triggers the release workflow automatically
+  5. Monitor the release and deploy workflows until completion
+  6. Report the deployed version to the user
 
 ## Code Standards
 
