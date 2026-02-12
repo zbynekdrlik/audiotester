@@ -21,7 +21,7 @@ env:
 jobs:
   deploy:
     name: Deploy to iem.lan
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, deployer]
 
     steps:
       - name: Get version
@@ -48,11 +48,6 @@ jobs:
           # Extract
           unzip release.zip -d release/
           ls -la release/
-
-      - name: Install SSH client
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y sshpass
 
       - name: Deploy to test machine
         env:
