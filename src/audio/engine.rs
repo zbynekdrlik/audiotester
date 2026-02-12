@@ -262,35 +262,48 @@ impl AudioEngine {
                 .map(|c| (c.sample_rate().0, c.channels()))
         );
 
-        // Determine sample rate to use:
-        // 1. If device reports a default, use that (ASIO devices often require this)
-        // 2. Otherwise use our configured rate
-        let actual_sample_rate = if let Ok(ref cfg) = default_output {
+        // Always use configured sample rate (default 96kHz)
+        // ASIO devices like VASIO-8 may report incorrect default rates (44100Hz)
+        // but actually run at the rate configured in their control panel (96kHz)
+        let actual_sample_rate = self.sample_rate;
+        tracing::info!("Using configured sample rate: {} Hz", actual_sample_rate);
+
+        // Log warning if device reports a different rate
+        if let Ok(ref cfg) = default_output {
             let device_rate = cfg.sample_rate().0;
-            if device_rate > 0 {
-                tracing::info!("Using device's reported sample rate: {} Hz", device_rate);
-                device_rate
-            } else {
-                tracing::info!(
-                    "Device reports 0 Hz, using configured: {} Hz",
-                    self.sample_rate
+            if device_rate > 0 && device_rate != actual_sample_rate {
+                tracing::warn!(
+                    "Device reports default {} Hz, but using configured {} Hz. \
+                     Ensure VBMatrix/ASIO control panel is set to {} Hz.",
+                    device_rate,
+                    actual_sample_rate,
+                    actual_sample_rate
                 );
-                self.sample_rate
             }
-        } else {
-            tracing::info!(
-                "No device config, using configured: {} Hz",
-                self.sample_rate
-            );
-            self.sample_rate
+        }
+
+        // Get device channel counts
+        let output_channels = default_output.as_ref().map(|c| c.channels()).unwrap_or(2);
+        let input_channels = default_input.as_ref().map(|c| c.channels()).unwrap_or(2);
+
+        tracing::info!(
+            "Device channel count: {} output, {} input",
+            output_channels,
+            input_channels
+        );
+
+        // Create output stream config with all device channels
+        // Signal will be sent on channel 0 (user's "channel 1"), others get silence
+        let output_config = StreamConfig {
+            channels: output_channels,
+            sample_rate: SampleRate(actual_sample_rate),
+            buffer_size: cpal::BufferSize::Default,
         };
 
-        self.sample_rate = actual_sample_rate;
-
-        // Create stream config for mono channel 1
-        let config = StreamConfig {
+        // Create input stream config (mono is fine for receiving loopback)
+        let input_config = StreamConfig {
             channels: 1,
-            sample_rate: SampleRate(self.sample_rate),
+            sample_rate: SampleRate(actual_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -312,23 +325,38 @@ impl AudioEngine {
             input_samples: std::sync::atomic::AtomicUsize::new(0),
         });
 
-        // Create output stream
+        // Create output stream with multi-channel support
         let output_state = Arc::clone(&shared_state);
+        let num_output_channels = output_channels as usize;
         let output_stream = device.build_output_stream(
-            &config,
+            &output_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if output_state.running.load(Ordering::Relaxed) {
                     if let Ok(mut gen) = output_state.generator.lock() {
-                        gen.fill_buffer(data);
-                        // Track output samples for debugging
+                        // Data is interleaved: [ch0, ch1, ch2, ..., ch(n-1), ch0, ch1, ...]
+                        // We put MLS signal on channel 0 (user's "channel 1"), silence on others
+                        let mut frame_count = 0usize;
+                        for frame in data.chunks_mut(num_output_channels) {
+                            let sample = gen.next_sample();
+                            if !frame.is_empty() {
+                                frame[0] = sample; // Channel 1 (index 0) gets signal
+                            }
+                            // Fill remaining channels with silence
+                            for ch in frame.iter_mut().skip(1) {
+                                *ch = 0.0;
+                            }
+                            frame_count += 1;
+                        }
+                        // Track output samples (count frames, not total samples)
                         let prev = output_state
                             .output_samples
-                            .fetch_add(data.len(), Ordering::Relaxed);
+                            .fetch_add(frame_count, Ordering::Relaxed);
                         // Log first callback to confirm output is working
                         if prev == 0 {
                             tracing::info!(
-                                "Output callback started: {} samples, first value: {:.4}",
-                                data.len(),
+                                "Output callback started: {} frames ({} channels), first value: {:.4}",
+                                frame_count,
+                                num_output_channels,
                                 data.first().copied().unwrap_or(0.0)
                             );
                         }
@@ -349,7 +377,7 @@ impl AudioEngine {
         let input_state = Arc::clone(&shared_state);
 
         let input_stream = device.build_input_stream(
-            &config,
+            &input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
                     if let Ok(mut prod) = input_producer.lock() {

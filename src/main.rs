@@ -4,6 +4,7 @@
 
 use anyhow::Result;
 use audiotester::audio::engine::AudioEngine;
+use audiotester::ui::tray::{TrayAction, TrayManager, TrayStatus};
 use std::io::{self, Write};
 use std::time::Duration;
 use tracing::{error, info};
@@ -31,6 +32,7 @@ fn main() -> Result<()> {
     // Parse options
     let mut device_name: Option<String> = None;
     let mut sample_rate: Option<u32> = None;
+    let mut no_tray = false;
     let mut i = 1;
 
     while i < args.len() {
@@ -69,6 +71,11 @@ fn main() -> Result<()> {
                 i += 2;
                 continue;
             }
+            "--no-tray" => {
+                no_tray = true;
+                i += 1;
+                continue;
+            }
             arg if arg.starts_with('-') => {
                 eprintln!("Unknown argument: {}", arg);
                 print_help();
@@ -86,7 +93,7 @@ fn main() -> Result<()> {
 
     // If device specified via command line, run with it
     if let Some(dev) = device_name {
-        run_with_device(&dev, sample_rate)?;
+        run_with_device(&dev, sample_rate, no_tray)?;
         return Ok(());
     }
 
@@ -100,7 +107,8 @@ fn print_help() {
     println!("Options:");
     println!("  -l, --list              List available ASIO devices");
     println!("  -d, --device NAME       Start monitoring with specified device");
-    println!("  -r, --sample-rate RATE  Set sample rate (default: device default)");
+    println!("  -r, --sample-rate RATE  Set sample rate (default: 96000)");
+    println!("      --no-tray           Disable system tray icon (console only)");
     println!("  -v, --version           Show version");
     println!("  -h, --help              Show this help");
     println!();
@@ -152,10 +160,15 @@ fn list_devices() -> Result<()> {
     Ok(())
 }
 
-fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
+fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -> Result<()> {
     println!("Starting with device: {}", device_name);
     if let Some(rate) = sample_rate {
         println!("Sample rate: {} Hz", rate);
+    } else {
+        println!(
+            "Sample rate: {} Hz (default)",
+            audiotester::DEFAULT_SAMPLE_RATE
+        );
     }
     println!();
 
@@ -184,7 +197,28 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
 
     info!("Output callback active - sending MLS signal on channel 1");
 
+    // Initialize tray manager
+    let mut tray_manager = TrayManager::new()?;
+    let use_tray = !no_tray && cfg!(windows);
+
+    if use_tray {
+        match tray_manager.init(Some(device_name)) {
+            Ok(()) => {
+                tray_manager.set_monitoring(true);
+                tray_manager.set_status(TrayStatus::Ok)?;
+                info!("System tray icon initialized");
+            }
+            Err(e) => {
+                error!("Failed to initialize tray icon: {}", e);
+                println!("Warning: Could not create system tray icon: {}", e);
+            }
+        }
+    }
+
     println!("Monitoring started. Press Ctrl+C to stop.");
+    if use_tray {
+        println!("System tray icon active - right-click for menu.");
+    }
     println!();
     println!("Status:");
     println!("────────────────────────────────────────");
@@ -201,6 +235,45 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
     let mut last_status = String::new();
     let mut iteration = 0u32;
     while running.load(std::sync::atomic::Ordering::SeqCst) {
+        // Check for tray menu events
+        if use_tray {
+            if let Some(action) = tray_manager.poll_event() {
+                match action {
+                    TrayAction::Exit => {
+                        info!("Exit requested from tray menu");
+                        break;
+                    }
+                    TrayAction::ToggleMonitoring => {
+                        if tray_manager.is_monitoring() {
+                            info!("Stopping monitoring from tray menu");
+                            engine.stop()?;
+                            tray_manager.set_monitoring(false);
+                            tray_manager.set_status(TrayStatus::Disconnected)?;
+                        } else {
+                            info!("Starting monitoring from tray menu");
+                            engine.start()?;
+                            tray_manager.set_monitoring(true);
+                            tray_manager.set_status(TrayStatus::Ok)?;
+                        }
+                    }
+                    TrayAction::ShowStats => {
+                        info!("Show stats requested (not yet implemented)");
+                        // TODO: Phase 5 - Open stats window
+                    }
+                    TrayAction::SelectDevice => {
+                        info!("Select device requested (not yet implemented)");
+                        // TODO: Open device selection dialog
+                    }
+                }
+            }
+        }
+
+        // Skip analysis if not monitoring
+        if use_tray && !tray_manager.is_monitoring() {
+            std::thread::sleep(Duration::from_millis(100));
+            continue;
+        }
+
         let (out_samples, in_samples) = engine.sample_counts();
 
         // Every 10 iterations, show sample counts for debugging
@@ -213,13 +286,32 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
         iteration += 1;
 
         if let Some(result) = engine.analyze() {
-            let status = if result.is_healthy {
-                "OK"
+            let (status, tray_status) = if result.is_healthy {
+                ("OK", TrayStatus::Ok)
             } else if result.lost_samples > 0 {
-                "LOSS"
+                ("LOSS", TrayStatus::Error)
+            } else if result.confidence < 0.5 {
+                ("LOW", TrayStatus::Warning)
             } else {
-                "WARN"
+                ("WARN", TrayStatus::Warning)
             };
+
+            // Update tray icon based on status
+            if use_tray {
+                let _ = tray_manager.set_status(tray_status);
+                let tooltip = format!(
+                    "Audiotester - {}ms latency, {:.0}% confidence",
+                    result.latency_ms,
+                    result.confidence * 100.0
+                );
+                let _ = tray_manager.set_tooltip(&tooltip);
+                let status_text = format!(
+                    "Latency: {:.2}ms | Confidence: {:.0}%",
+                    result.latency_ms,
+                    result.confidence * 100.0
+                );
+                let _ = tray_manager.set_status_text(&status_text);
+            }
 
             let status_line = format!(
                 "Latency: {:>6.2}ms | Lost: {:>4} | Confidence: {:>5.1}% | Out: {:>8} | In: {:>8} | Status: {}",
@@ -280,5 +372,5 @@ fn interactive_mode() -> Result<()> {
     };
 
     let device_name = &devices[device_num - 1].name;
-    run_with_device(device_name, None) // Use default sample rate (96kHz)
+    run_with_device(device_name, None, false)
 }
