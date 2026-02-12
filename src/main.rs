@@ -204,7 +204,7 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>) -> Result<()> {
         let (out_samples, in_samples) = engine.sample_counts();
 
         // Every 10 iterations, show sample counts for debugging
-        if iteration % 10 == 0 && iteration > 0 {
+        if iteration > 0 && iteration.is_multiple_of(10) {
             info!(
                 "Audio I/O: {} samples out, {} samples in",
                 out_samples, in_samples
