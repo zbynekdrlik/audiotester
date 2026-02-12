@@ -55,46 +55,42 @@ impl MlsGenerator {
         }
     }
 
-    /// Generate the MLS sequence using LFSR with proper primitive polynomials
+    /// Generate the MLS sequence using Galois LFSR
     fn generate_sequence(order: u32, length: usize) -> Vec<f32> {
         let mut sequence = Vec::with_capacity(length);
         let mut lfsr: u32 = 1; // Initial state (non-zero)
 
-        // Tap positions for maximal length sequences (Fibonacci LFSR)
-        // These are the bit positions to XOR for feedback (0-indexed)
-        // From primitive polynomials: x^n + x^a + 1 => taps [n-1, a-1]
-        // Source: https://en.wikipedia.org/wiki/Linear-feedback_shift_register
-        let taps: &[u32] = match order {
-            2 => &[1, 0],         // x^2 + x + 1
-            3 => &[2, 0],         // x^3 + x + 1
-            4 => &[3, 0],         // x^4 + x + 1
-            5 => &[4, 1],         // x^5 + x^2 + 1
-            6 => &[5, 0],         // x^6 + x + 1
-            7 => &[6, 0],         // x^7 + x + 1
-            8 => &[7, 5, 4, 3],   // x^8 + x^6 + x^5 + x^4 + 1
-            9 => &[8, 3],         // x^9 + x^4 + 1
-            10 => &[9, 2],        // x^10 + x^3 + 1
-            11 => &[10, 1],       // x^11 + x^2 + 1
-            12 => &[11, 5, 3, 0], // x^12 + x^6 + x^4 + x + 1
-            13 => &[12, 3, 2, 0], // x^13 + x^4 + x^3 + x + 1
-            14 => &[13, 4, 2, 0], // x^14 + x^5 + x^3 + x + 1
-            15 => &[14, 0],       // x^15 + x + 1
-            _ => &[1, 0],         // Fallback
+        // Feedback masks for Galois LFSR (primitive polynomials)
+        // The mask has bits set at the tap positions (excluding the highest bit)
+        // Source: https://docs.xilinx.com/v/u/en-US/xapp052 (Xilinx LFSR reference)
+        let mask: u32 = match order {
+            2 => 0x3,     // x^2 + x + 1
+            3 => 0x6,     // x^3 + x^2 + 1
+            4 => 0xC,     // x^4 + x^3 + 1
+            5 => 0x14,    // x^5 + x^3 + 1
+            6 => 0x30,    // x^6 + x^5 + 1
+            7 => 0x60,    // x^7 + x^6 + 1
+            8 => 0xB8,    // x^8 + x^6 + x^5 + x^4 + 1
+            9 => 0x110,   // x^9 + x^5 + 1
+            10 => 0x240,  // x^10 + x^7 + 1
+            11 => 0x500,  // x^11 + x^9 + 1
+            12 => 0xE08,  // x^12 + x^11 + x^10 + x^4 + 1
+            13 => 0x1C80, // x^13 + x^12 + x^11 + x^8 + 1
+            14 => 0x3802, // x^14 + x^13 + x^12 + x^2 + 1
+            15 => 0x6000, // x^15 + x^14 + 1
+            _ => 0x3,     // Fallback to order 2
         };
 
         for _ in 0..length {
             // Output is the LSB
-            let bit = lfsr & 1;
-            sequence.push(if bit == 1 { 1.0 } else { -1.0 });
+            let output = lfsr & 1;
+            sequence.push(if output == 1 { 1.0 } else { -1.0 });
 
-            // Calculate feedback by XORing all tap positions
-            let mut feedback = 0u32;
-            for &tap in taps {
-                feedback ^= (lfsr >> tap) & 1;
+            // Galois LFSR: shift right, XOR with mask if output was 1
+            lfsr >>= 1;
+            if output == 1 {
+                lfsr ^= mask;
             }
-
-            // Shift right and insert feedback at MSB
-            lfsr = (lfsr >> 1) | (feedback << (order - 1));
         }
 
         sequence
