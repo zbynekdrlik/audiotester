@@ -92,7 +92,7 @@ impl TrayManager {
     ///
     /// # Arguments
     /// * `text` - Tooltip text to display on hover
-    pub fn set_tooltip(&mut self, text: &str) -> Result<(), TrayError> {
+    pub fn set_tooltip(&mut self, _text: &str) -> Result<(), TrayError> {
         // TODO: Phase 4 - Update tooltip
         Ok(())
     }

@@ -4,7 +4,6 @@
 //! and tracks frame markers to detect sample loss.
 
 use rustfft::{num_complex::Complex, FftPlanner};
-use std::sync::Arc;
 
 /// Analysis results from comparing sent and received signals
 #[derive(Debug, Clone, Default)]
@@ -136,7 +135,7 @@ impl Analyzer {
 
         // Multiply with conjugate of reference FFT
         for (r, ref_c) in received_complex.iter_mut().zip(&self.reference_fft) {
-            *r = *r * *ref_c;
+            *r *= *ref_c;
         }
 
         // Inverse FFT to get correlation

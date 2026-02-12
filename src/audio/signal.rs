@@ -3,12 +3,6 @@
 //! Generates pseudo-random binary sequences with perfect autocorrelation
 //! properties, ideal for latency measurement and sample identification.
 
-use std::f32::consts::PI;
-
-/// Primitive polynomial coefficients for MLS generation
-/// These are the feedback taps for a 15-bit LFSR
-const PRIMITIVE_POLY_15: [u32; 2] = [15, 14]; // x^15 + x^14 + 1
-
 /// MLS (Maximum Length Sequence) generator
 ///
 /// Generates a pseudo-random binary sequence of length 2^order - 1 with
@@ -47,7 +41,7 @@ impl MlsGenerator {
     /// let sample = gen.next_sample();
     /// ```
     pub fn new(order: u32) -> Self {
-        assert!(order >= 2 && order <= 15, "Order must be between 2 and 15");
+        assert!((2..=15).contains(&order), "Order must be between 2 and 15");
 
         let length = (1usize << order) - 1;
         let sequence = Self::generate_sequence(order, length);
@@ -61,22 +55,42 @@ impl MlsGenerator {
         }
     }
 
-    /// Generate the MLS sequence using LFSR
+    /// Generate the MLS sequence using Galois LFSR
     fn generate_sequence(order: u32, length: usize) -> Vec<f32> {
         let mut sequence = Vec::with_capacity(length);
         let mut lfsr: u32 = 1; // Initial state (non-zero)
 
+        // Feedback masks for Galois LFSR (primitive polynomials)
+        // The mask has bits set at the tap positions (excluding the highest bit)
+        // Source: https://docs.xilinx.com/v/u/en-US/xapp052 (Xilinx LFSR reference)
+        let mask: u32 = match order {
+            2 => 0x3,     // x^2 + x + 1
+            3 => 0x6,     // x^3 + x^2 + 1
+            4 => 0xC,     // x^4 + x^3 + 1
+            5 => 0x14,    // x^5 + x^3 + 1
+            6 => 0x30,    // x^6 + x^5 + 1
+            7 => 0x60,    // x^7 + x^6 + 1
+            8 => 0xB8,    // x^8 + x^6 + x^5 + x^4 + 1
+            9 => 0x110,   // x^9 + x^5 + 1
+            10 => 0x240,  // x^10 + x^7 + 1
+            11 => 0x500,  // x^11 + x^9 + 1
+            12 => 0xE08,  // x^12 + x^11 + x^10 + x^4 + 1
+            13 => 0x1C80, // x^13 + x^12 + x^11 + x^8 + 1
+            14 => 0x3802, // x^14 + x^13 + x^12 + x^2 + 1
+            15 => 0x6000, // x^15 + x^14 + 1
+            _ => 0x3,     // Fallback to order 2
+        };
+
         for _ in 0..length {
             // Output is the LSB
-            let bit = lfsr & 1;
-            sequence.push(if bit == 1 { 1.0 } else { -1.0 });
+            let output = lfsr & 1;
+            sequence.push(if output == 1 { 1.0 } else { -1.0 });
 
-            // Calculate feedback based on primitive polynomial
-            // For order 15: x^15 + x^14 + 1
-            let feedback = ((lfsr >> 14) ^ (lfsr >> 13)) & 1;
-
-            // Shift right and insert feedback at MSB
-            lfsr = (lfsr >> 1) | (feedback << (order - 1));
+            // Galois LFSR: shift right, XOR with mask if output was 1
+            lfsr >>= 1;
+            if output == 1 {
+                lfsr ^= mask;
+            }
         }
 
         sequence
@@ -114,6 +128,11 @@ impl MlsGenerator {
     /// Get the sequence length
     pub fn length(&self) -> usize {
         self.length
+    }
+
+    /// Get the order (sequence length = 2^order - 1)
+    pub fn order(&self) -> u32 {
+        self.order
     }
 
     /// Get the full sequence for correlation
