@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["Audiotester Team"]
 description = "Windows ASIO audio testing application for monitoring audio paths"
 license = "MIT"
-repository = "https://github.com/newlevel/audiotester"
+repository = "https://github.com/zbynekdrlik/audiotester"
 keywords = ["audio", "asio", "testing", "windows", "latency"]
 categories = ["multimedia::audio"]
 

@@ -1,5 +1,5 @@
 # Audiotester Windows Installer
-# Usage: irm https://raw.githubusercontent.com/newlevel/audiotester/main/installer/install.ps1 | iex
+# Usage: irm https://raw.githubusercontent.com/zbynekdrlik/audiotester/main/installer/install.ps1 | iex
 
 #Requires -Version 5.1
 
@@ -13,7 +13,7 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
-$RepoOwner = "newlevel"
+$RepoOwner = "zbynekdrlik"
 $RepoName = "audiotester"
 $ExeName = "audiotester.exe"
 
