@@ -3,12 +3,6 @@
 //! Generates pseudo-random binary sequences with perfect autocorrelation
 //! properties, ideal for latency measurement and sample identification.
 
-use std::f32::consts::PI;
-
-/// Primitive polynomial coefficients for MLS generation
-/// These are the feedback taps for a 15-bit LFSR
-const PRIMITIVE_POLY_15: [u32; 2] = [15, 14]; // x^15 + x^14 + 1
-
 /// MLS (Maximum Length Sequence) generator
 ///
 /// Generates a pseudo-random binary sequence of length 2^order - 1 with
@@ -47,7 +41,7 @@ impl MlsGenerator {
     /// let sample = gen.next_sample();
     /// ```
     pub fn new(order: u32) -> Self {
-        assert!(order >= 2 && order <= 15, "Order must be between 2 and 15");
+        assert!((2..=15).contains(&order), "Order must be between 2 and 15");
 
         let length = (1usize << order) - 1;
         let sequence = Self::generate_sequence(order, length);
@@ -114,6 +108,11 @@ impl MlsGenerator {
     /// Get the sequence length
     pub fn length(&self) -> usize {
         self.length
+    }
+
+    /// Get the order (sequence length = 2^order - 1)
+    pub fn order(&self) -> u32 {
+        self.order
     }
 
     /// Get the full sequence for correlation

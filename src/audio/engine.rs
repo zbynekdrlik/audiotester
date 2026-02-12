@@ -178,11 +178,10 @@ impl AudioEngine {
             if let Ok(configs) = device.supported_output_configs() {
                 for config in configs {
                     for &rate in &common_rates {
-                        if rate >= config.min_sample_rate().0 && rate <= config.max_sample_rate().0
+                        if (config.min_sample_rate().0..=config.max_sample_rate().0).contains(&rate)
+                            && !sample_rates.contains(&rate)
                         {
-                            if !sample_rates.contains(&rate) {
-                                sample_rates.push(rate);
-                            }
+                            sample_rates.push(rate);
                         }
                     }
                 }
