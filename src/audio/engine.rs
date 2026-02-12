@@ -10,7 +10,8 @@ use crate::audio::signal::MlsGenerator;
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
-use ringbuf::{HeapRb, Rb};
+use ringbuf::traits::{Consumer, Producer, Split};
+use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
@@ -91,8 +92,6 @@ pub struct AudioEngine {
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
     shared_state: Option<Arc<SharedState>>,
-    /// Producer for input samples (audio callback writes)
-    input_producer: Option<ringbuf::HeapProd<f32>>,
     /// Consumer for input samples (analysis reads)
     input_consumer: Option<ringbuf::HeapCons<f32>>,
 }
@@ -109,7 +108,6 @@ impl AudioEngine {
             input_stream: None,
             output_stream: None,
             shared_state: None,
-            input_producer: None,
             input_consumer: None,
         }
     }
@@ -242,7 +240,7 @@ impl AudioEngine {
         let input_config = device
             .default_input_config()
             .context("Failed to get input config")?;
-        let output_config = device
+        let _output_config = device
             .default_output_config()
             .context("Failed to get output config")?;
 
@@ -294,14 +292,13 @@ impl AudioEngine {
 
         // Create input stream
         let input_producer = Arc::new(Mutex::new(producer));
-        let input_prod_clone = Arc::clone(&input_producer);
         let input_state = Arc::clone(&shared_state);
 
         let input_stream = device.build_input_stream(
             &config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
-                    if let Ok(mut prod) = input_prod_clone.lock() {
+                    if let Ok(mut prod) = input_producer.lock() {
                         // Push samples to ring buffer (drop oldest if full)
                         for &sample in data {
                             let _ = prod.try_push(sample);
@@ -368,7 +365,7 @@ impl AudioEngine {
         // Need at least one MLS period for analysis
         let required_samples = crate::MLS_LENGTH + 1000; // Extra for latency
 
-        if consumer.len() < required_samples {
+        if consumer.occupied_len() < required_samples {
             return None;
         }
 
