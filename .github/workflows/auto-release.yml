@@ -187,15 +187,10 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          # Create start.bat with environment variables for auto-configuration
+          # Create start.bat with environment variables using cmd echo
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "powershell -Command \"Set-Content -Path 'C:\Users\iem\audiotester\start.bat' -Value '@echo off
-          set AUDIOTESTER_DEVICE=VASIO 8
-          set AUDIOTESTER_SAMPLE_RATE=96000
-          set AUDIOTESTER_AUTO_START=true
-          set RUST_LOG=audiotester=info
-          C:\Users\iem\audiotester\audiotester.exe'\""
+            "cmd /c \"echo @echo off> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_DEVICE=VASIO 8>> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_SAMPLE_RATE=96000>> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_AUTO_START=true>> C:\Users\iem\audiotester\start.bat && echo set RUST_LOG=audiotester=info>> C:\Users\iem\audiotester\start.bat && echo C:\Users\iem\audiotester\audiotester.exe>> C:\Users\iem\audiotester\start.bat\""
 
           # Create/update scheduled task to run in interactive desktop session
           sshpass -e ssh -o StrictHostKeyChecking=no \

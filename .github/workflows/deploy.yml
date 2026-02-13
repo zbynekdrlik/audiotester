@@ -79,15 +79,10 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          # Create start.bat with environment variables for auto-configuration
+          # Create start.bat with environment variables using cmd echo
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "powershell -Command \"Set-Content -Path '${{ env.DEPLOY_PATH }}\start.bat' -Value '@echo off
-          set AUDIOTESTER_DEVICE=VASIO 8
-          set AUDIOTESTER_SAMPLE_RATE=96000
-          set AUDIOTESTER_AUTO_START=true
-          set RUST_LOG=audiotester=info
-          ${{ env.DEPLOY_PATH }}\audiotester.exe'\""
+            "cmd /c \"echo @echo off> ${{ env.DEPLOY_PATH }}\start.bat && echo set AUDIOTESTER_DEVICE=VASIO 8>> ${{ env.DEPLOY_PATH }}\start.bat && echo set AUDIOTESTER_SAMPLE_RATE=96000>> ${{ env.DEPLOY_PATH }}\start.bat && echo set AUDIOTESTER_AUTO_START=true>> ${{ env.DEPLOY_PATH }}\start.bat && echo set RUST_LOG=audiotester=info>> ${{ env.DEPLOY_PATH }}\start.bat && echo ${{ env.DEPLOY_PATH }}\audiotester.exe>> ${{ env.DEPLOY_PATH }}\start.bat\""
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
