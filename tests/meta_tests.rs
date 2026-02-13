@@ -364,7 +364,7 @@ fn frame_loss_detection_accuracy() {
     // But 500 is expected after 499, and 510 is received, so diff = 510 - 500 = 10
     // Loss = 10 - 1 = 9 (the algorithm subtracts 1 because diff=1 means no loss)
     assert!(
-        loss >= 9 && loss <= 10,
+        (9..=10).contains(&loss),
         "Should detect approximately 10 lost frames, got {}",
         loss
     );

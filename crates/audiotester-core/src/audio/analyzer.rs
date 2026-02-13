@@ -344,7 +344,7 @@ mod tests {
         // diff = 105 - 100 = 5, lost = diff - 1 = 4
         // This is because the algorithm detects gap size minus the first received sample
         assert!(
-            lost >= 4 && lost <= 5,
+            (4..=5).contains(&lost),
             "Should detect approximately 5 lost frames, got {}",
             lost
         );
