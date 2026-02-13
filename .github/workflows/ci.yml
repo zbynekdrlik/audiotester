@@ -382,6 +382,7 @@ jobs:
           echo "Sample loss rate acceptable: $LOST_DIFF in 10s"
 
   # Summary job that depends on all checks including branch-check
+  # STRICT: All jobs must pass for PR to be green, including deploy-dev
   ci-success:
     name: CI Success
     needs:
@@ -403,6 +404,9 @@ jobs:
       - name: Check all jobs passed
         shell: bash
         run: |
+          # STRICT CI VALIDATION
+          # All jobs must succeed (or be skipped for conditional jobs)
+          # deploy-dev is now BLOCKING - hardware verification required
           if [[ "${{ needs.branch-check.result }}" != "success" ]] || \
              [[ "${{ needs.main-sync.result }}" != "success" && "${{ needs.main-sync.result }}" != "skipped" ]] || \
              [[ "${{ needs.fmt.result }}" != "success" ]] || \
@@ -411,13 +415,21 @@ jobs:
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.e2e.result }}" != "success" ]] || \
              [[ "${{ needs.playwright.result }}" != "success" ]] || \
-             [[ "${{ needs.build-dev.result }}" != "success" && "${{ needs.build-dev.result }}" != "skipped" ]]; then
-            echo "One or more jobs failed"
+             [[ "${{ needs.build-dev.result }}" != "success" && "${{ needs.build-dev.result }}" != "skipped" ]] || \
+             [[ "${{ needs.deploy-dev.result }}" != "success" && "${{ needs.deploy-dev.result }}" != "skipped" ]]; then
+            echo "::error::One or more jobs failed - PR cannot merge"
+            echo ""
+            echo "Job Results:"
+            echo "  branch-check: ${{ needs.branch-check.result }}"
+            echo "  main-sync: ${{ needs.main-sync.result }}"
+            echo "  fmt: ${{ needs.fmt.result }}"
+            echo "  clippy: ${{ needs.clippy.result }}"
+            echo "  build: ${{ needs.build.result }}"
+            echo "  test: ${{ needs.test.result }}"
+            echo "  e2e: ${{ needs.e2e.result }}"
+            echo "  playwright: ${{ needs.playwright.result }}"
+            echo "  build-dev: ${{ needs.build-dev.result }}"
+            echo "  deploy-dev: ${{ needs.deploy-dev.result }}"
             exit 1
           fi
-          echo "All CI checks passed!"
-
-          # Report deploy-dev status (informational, non-blocking)
-          if [[ "${{ needs.deploy-dev.result }}" == "failure" ]]; then
-            echo "::warning::deploy-dev failed (non-blocking) - check deployment logs"
-          fi
+          echo "All CI checks passed including hardware verification!"

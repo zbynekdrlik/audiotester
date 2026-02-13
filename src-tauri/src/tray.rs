@@ -1,19 +1,83 @@
 //! Tauri 2 tray icon and menu management
 //!
 //! Provides system tray icon with status indication and context menu.
+//! Status updates are handled via Tauri global events.
 
+use serde::{Deserialize, Serialize};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Manager};
 
 /// Status colors for the tray icon
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrayStatus {
     Ok,
     Warning,
     Error,
     Disconnected,
+}
+
+/// Status event payload for tray icon updates
+///
+/// Emitted from the monitoring loop to update tray icon color
+/// based on analysis results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrayStatusEvent {
+    /// Status level: "ok", "warning", "error", "disconnected"
+    pub status: String,
+    /// Current measured latency in milliseconds
+    pub latency_ms: f64,
+    /// Number of lost samples in this measurement
+    pub lost_samples: u64,
+}
+
+impl TrayStatusEvent {
+    /// Convert string status to TrayStatus enum
+    pub fn to_tray_status(&self) -> TrayStatus {
+        match self.status.as_str() {
+            "ok" => TrayStatus::Ok,
+            "warning" => TrayStatus::Warning,
+            "error" => TrayStatus::Error,
+            _ => TrayStatus::Disconnected,
+        }
+    }
+
+    /// Create an Ok status event
+    pub fn ok(latency_ms: f64) -> Self {
+        Self {
+            status: "ok".to_string(),
+            latency_ms,
+            lost_samples: 0,
+        }
+    }
+
+    /// Create a Warning status event
+    pub fn warning(latency_ms: f64, lost_samples: u64) -> Self {
+        Self {
+            status: "warning".to_string(),
+            latency_ms,
+            lost_samples,
+        }
+    }
+
+    /// Create an Error status event
+    pub fn error(latency_ms: f64, lost_samples: u64) -> Self {
+        Self {
+            status: "error".to_string(),
+            latency_ms,
+            lost_samples,
+        }
+    }
+
+    /// Create a Disconnected status event
+    pub fn disconnected() -> Self {
+        Self {
+            status: "disconnected".to_string(),
+            latency_ms: 0.0,
+            lost_samples: 0,
+        }
+    }
 }
 
 /// Icon size in pixels
@@ -114,4 +178,56 @@ pub fn make_status_icon(status: TrayStatus) -> Image<'static> {
     }
 
     Image::new_owned(rgba, ICON_SIZE, ICON_SIZE)
+}
+
+/// Update the tray icon to reflect the current status
+///
+/// # Arguments
+/// * `app` - The Tauri AppHandle
+/// * `status` - The new status to display
+///
+/// # Returns
+/// Ok(()) on success, error if tray icon cannot be updated
+pub fn update_tray_status(
+    app: &AppHandle,
+    status: TrayStatus,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Get the tray icon by id "main" (the default)
+    if let Some(tray) = app.tray_by_id("main") {
+        let icon = make_status_icon(status);
+        tray.set_icon(Some(icon))?;
+
+        // Update tooltip with status info
+        let tooltip = match status {
+            TrayStatus::Ok => "Audiotester - Monitoring OK",
+            TrayStatus::Warning => "Audiotester - Warning (sample loss detected)",
+            TrayStatus::Error => "Audiotester - Error (high latency)",
+            TrayStatus::Disconnected => "Audiotester - Disconnected",
+        };
+        tray.set_tooltip(Some(tooltip))?;
+
+        tracing::trace!("Tray icon updated to {:?}", status);
+    }
+    Ok(())
+}
+
+/// Determine tray status from analysis results
+///
+/// # Status mapping:
+/// - Ok (green): Latency < 50ms, no sample loss
+/// - Warning (orange): Sample loss detected
+/// - Error (red): Latency >= 50ms
+/// - Disconnected (gray): Not monitoring
+pub fn status_from_analysis(
+    latency_ms: f64,
+    lost_samples: u64,
+    corrupted_samples: u64,
+) -> TrayStatus {
+    if lost_samples > 0 || corrupted_samples > 0 {
+        TrayStatus::Warning
+    } else if latency_ms >= 50.0 {
+        TrayStatus::Error
+    } else {
+        TrayStatus::Ok
+    }
 }

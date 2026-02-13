@@ -84,6 +84,8 @@ struct SharedState {
     output_samples: std::sync::atomic::AtomicUsize,
     /// Counter for input samples (debug)
     input_samples: std::sync::atomic::AtomicUsize,
+    /// Global frame counter for output (used for loss detection)
+    output_frame_counter: std::sync::atomic::AtomicU64,
 }
 
 /// ASIO audio engine for managing audio streams
@@ -96,8 +98,10 @@ pub struct AudioEngine {
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
     shared_state: Option<Arc<SharedState>>,
-    /// Consumer for input samples (analysis reads)
+    /// Consumer for input samples (MLS channel for latency analysis)
     input_consumer: Option<ringbuf::HeapCons<f32>>,
+    /// Consumer for counter samples (frame counter channel for loss detection)
+    counter_consumer: Option<ringbuf::HeapCons<f32>>,
 }
 
 impl AudioEngine {
@@ -113,6 +117,7 @@ impl AudioEngine {
             output_stream: None,
             shared_state: None,
             input_consumer: None,
+            counter_consumer: None,
         }
     }
 
@@ -338,9 +343,14 @@ impl AudioEngine {
         input_config.sample_rate = SampleRate(effective_rate);
         tracing::info!("Effective sample rate: {} Hz", effective_rate);
 
-        // Create ring buffer for input samples
-        let ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
-        let (producer, consumer) = ring.split();
+        // Create ring buffers for input samples
+        // MLS ring buffer: ch0 samples for latency analysis
+        let mls_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
+        let (mls_producer, mls_consumer) = mls_ring.split();
+
+        // Counter ring buffer: ch1 samples for loss detection
+        let counter_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
+        let (counter_producer, counter_consumer) = counter_ring.split();
 
         // Create shared state
         let generator = MlsGenerator::new(crate::MLS_ORDER);
@@ -354,9 +364,12 @@ impl AudioEngine {
             running: AtomicBool::new(true),
             output_samples: std::sync::atomic::AtomicUsize::new(0),
             input_samples: std::sync::atomic::AtomicUsize::new(0),
+            output_frame_counter: std::sync::atomic::AtomicU64::new(0),
         });
 
         // Create output stream with multi-channel support
+        // Channel 0: MLS signal for latency measurement
+        // Channel 1: Frame counter (sawtooth 0.0-1.0) for loss detection
         let output_state = Arc::clone(&shared_state);
         let num_output_channels = output_channels as usize;
         let output_stream = device.build_output_stream(
@@ -365,19 +378,41 @@ impl AudioEngine {
                 if output_state.running.load(Ordering::Relaxed) {
                     if let Ok(mut gen) = output_state.generator.lock() {
                         // Data is interleaved: [ch0, ch1, ch2, ..., ch(n-1), ch0, ch1, ...]
-                        // We put MLS signal on channel 0 (user's "channel 1"), silence on others
+                        // ch0 (user's "channel 1"): MLS signal for latency
+                        // ch1 (user's "channel 2"): Frame counter for loss detection
                         let mut frame_count = 0usize;
-                        for frame in data.chunks_mut(num_output_channels) {
+
+                        // Get starting frame counter value
+                        let start_counter = output_state
+                            .output_frame_counter
+                            .load(Ordering::Relaxed);
+
+                        for (i, frame) in data.chunks_mut(num_output_channels).enumerate() {
+                            // Channel 0: MLS signal
                             let sample = gen.next_sample();
                             if !frame.is_empty() {
-                                frame[0] = sample; // Channel 1 (index 0) gets signal
+                                frame[0] = sample;
                             }
+
+                            // Channel 1: Frame counter as normalized sawtooth (0.0 to 1.0)
+                            // Counter wraps at 65536 for 16-bit precision in float
+                            if frame.len() > 1 {
+                                let counter = (start_counter + i as u64) & 0xFFFF;
+                                frame[1] = (counter as f32) / 65536.0;
+                            }
+
                             // Fill remaining channels with silence
-                            for ch in frame.iter_mut().skip(1) {
+                            for ch in frame.iter_mut().skip(2) {
                                 *ch = 0.0;
                             }
                             frame_count += 1;
                         }
+
+                        // Update global frame counter
+                        output_state
+                            .output_frame_counter
+                            .fetch_add(frame_count as u64, Ordering::Relaxed);
+
                         // Track output samples (count frames, not total samples)
                         let prev = output_state
                             .output_samples
@@ -385,10 +420,11 @@ impl AudioEngine {
                         // Log first callback to confirm output is working
                         if prev == 0 {
                             tracing::info!(
-                                "Output callback started: {} frames ({} channels), first value: {:.4}",
+                                "Output callback started: {} frames ({} channels), ch0={:.4}, ch1={:.4}",
                                 frame_count,
                                 num_output_channels,
-                                data.first().copied().unwrap_or(0.0)
+                                data.first().copied().unwrap_or(0.0),
+                                data.get(1).copied().unwrap_or(0.0)
                             );
                         }
                     }
@@ -403,8 +439,11 @@ impl AudioEngine {
             None,
         )?;
 
-        // Create input stream
-        let input_producer = Arc::new(Mutex::new(producer));
+        // Create input stream with dual-channel extraction
+        // ch0 → MLS producer (latency measurement)
+        // ch1 → Counter producer (loss detection)
+        let mls_input_producer = Arc::new(Mutex::new(mls_producer));
+        let counter_input_producer = Arc::new(Mutex::new(counter_producer));
         let input_state = Arc::clone(&shared_state);
         let num_input_channels = input_channels as usize;
 
@@ -412,12 +451,21 @@ impl AudioEngine {
             &input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
-                    if let Ok(mut prod) = input_producer.lock() {
+                    let mls_lock = mls_input_producer.lock();
+                    let counter_lock = counter_input_producer.lock();
+
+                    if let (Ok(mut mls_prod), Ok(mut cnt_prod)) = (mls_lock, counter_lock) {
                         // Data is interleaved: [ch0, ch1, ch2, ..., ch0, ch1, ...]
-                        // Extract channel 0 (user's "channel 1") only
+                        // ch0 (user's "channel 1"): MLS signal for latency
+                        // ch1 (user's "channel 2"): Frame counter for loss detection
                         for frame in data.chunks(num_input_channels) {
+                            // Extract ch0 (MLS)
                             if !frame.is_empty() {
-                                let _ = prod.try_push(frame[0]);
+                                let _ = mls_prod.try_push(frame[0]);
+                            }
+                            // Extract ch1 (counter) if available
+                            if frame.len() > 1 {
+                                let _ = cnt_prod.try_push(frame[1]);
                             }
                         }
                         // Track input samples (count frames, not total samples)
@@ -427,16 +475,22 @@ impl AudioEngine {
                             .fetch_add(frame_count, Ordering::Relaxed);
                         // Log first callback to confirm input is working
                         if prev == 0 {
-                            let max_level = data
+                            let max_level_ch0 = data
                                 .chunks(num_input_channels)
                                 .filter_map(|f| f.first())
                                 .map(|x| x.abs())
                                 .fold(0.0f32, f32::max);
+                            let max_level_ch1 = data
+                                .chunks(num_input_channels)
+                                .filter_map(|f| f.get(1))
+                                .map(|x| x.abs())
+                                .fold(0.0f32, f32::max);
                             tracing::info!(
-                                "Input callback started: {} frames ({} channels), ch0 max level: {:.4}",
+                                "Input callback started: {} frames ({} channels), ch0 max: {:.4}, ch1 max: {:.4}",
                                 frame_count,
                                 num_input_channels,
-                                max_level
+                                max_level_ch0,
+                                max_level_ch1
                             );
                         }
                     }
@@ -456,7 +510,8 @@ impl AudioEngine {
         self.output_stream = Some(output_stream);
         self.input_stream = Some(input_stream);
         self.shared_state = Some(shared_state);
-        self.input_consumer = Some(consumer);
+        self.input_consumer = Some(mls_consumer);
+        self.counter_consumer = Some(counter_consumer);
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
 
@@ -481,6 +536,7 @@ impl AudioEngine {
         self.output_stream = None;
         self.shared_state = None;
         self.input_consumer = None;
+        self.counter_consumer = None;
 
         self.state = EngineState::Stopped;
 
@@ -492,28 +548,45 @@ impl AudioEngine {
     /// Analyze buffered input samples
     ///
     /// Call this periodically from the main thread to process received audio.
+    /// Uses dual-channel analysis:
+    /// - Channel 0 (MLS): Cross-correlation for latency measurement
+    /// - Channel 1 (counter): Frame sequence tracking for loss detection
     ///
     /// # Returns
     /// Analysis result if enough samples are available
     pub fn analyze(&mut self) -> Option<AnalysisResult> {
-        let consumer = self.input_consumer.as_mut()?;
+        let mls_consumer = self.input_consumer.as_mut()?;
+        let counter_consumer = self.counter_consumer.as_mut()?;
         let shared_state = self.shared_state.as_ref()?;
 
         // Need at least one MLS period for analysis
         let required_samples = crate::MLS_LENGTH + 1000; // Extra for latency
 
-        if consumer.occupied_len() < required_samples {
+        if mls_consumer.occupied_len() < required_samples {
             return None;
         }
 
-        // Read samples from ring buffer
-        let mut samples = vec![0.0f32; required_samples];
-        let read = consumer.pop_slice(&mut samples);
-        samples.truncate(read);
+        // Read MLS samples from ring buffer
+        let mut mls_samples = vec![0.0f32; required_samples];
+        let mls_read = mls_consumer.pop_slice(&mut mls_samples);
+        mls_samples.truncate(mls_read);
+
+        // Read counter samples (same amount if available)
+        let counter_available = counter_consumer.occupied_len().min(mls_read);
+        let mut counter_samples = vec![0.0f32; counter_available];
+        let counter_read = counter_consumer.pop_slice(&mut counter_samples);
+        counter_samples.truncate(counter_read);
 
         // Run analysis
         if let Ok(mut analyzer) = shared_state.analyzer.lock() {
-            let result = analyzer.analyze(&samples);
+            let mut result = analyzer.analyze(&mls_samples);
+
+            // If we have counter samples, use frame-based loss detection
+            // This replaces the latency-delta heuristic with accurate frame tracking
+            if !counter_samples.is_empty() {
+                let frame_loss = analyzer.detect_frame_loss(&counter_samples);
+                result.lost_samples = frame_loss;
+            }
 
             // Store result
             if let Ok(mut last) = shared_state.last_result.lock() {

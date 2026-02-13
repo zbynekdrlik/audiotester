@@ -120,6 +120,11 @@ impl Analyzer {
     }
 
     /// Perform FFT-based cross-correlation
+    ///
+    /// The correlation peak search is constrained to a reasonable latency range
+    /// (0-100ms) to prevent aliasing artifacts from the circular FFT correlation.
+    /// This fixes the issue where latency would cycle through 0→341→682ms due to
+    /// the MLS signal being periodic and the FFT producing aliased correlation peaks.
     fn cross_correlate(&mut self, received: &[f32]) -> (usize, f32) {
         // Zero-pad received signal
         let mut received_complex: Vec<Complex<f32>> = received
@@ -142,12 +147,19 @@ impl Analyzer {
         let ifft = self.fft_planner.plan_fft_inverse(self.fft_size);
         ifft.process(&mut received_complex);
 
-        // Find peak in correlation
+        // Constrain search to reasonable latency range (0-100ms)
+        // At any sample rate, 100ms = sample_rate / 10 samples
+        // This prevents FFT circular correlation aliasing from causing latency
+        // to cycle through MLS period multiples (0→341→682ms at 96kHz)
+        let max_latency_samples = (self.sample_rate / 10) as usize;
+        let search_limit = max_latency_samples.min(received_complex.len());
+
+        // Find peak in correlation (constrained to latency bounds)
         let mut max_val = 0.0f32;
         let mut max_idx = 0;
         let norm = 1.0 / self.fft_size as f32;
 
-        for (i, c) in received_complex.iter().enumerate() {
+        for (i, c) in received_complex.iter().take(search_limit).enumerate() {
             let val = (c.re * norm).abs();
             if val > max_val {
                 max_val = val;
@@ -162,7 +174,10 @@ impl Analyzer {
         (max_idx, confidence.min(1.0))
     }
 
-    /// Detect sample loss based on latency changes
+    /// Detect sample loss based on latency changes (legacy heuristic)
+    ///
+    /// Note: This method is deprecated in favor of `detect_frame_loss` which
+    /// uses the counter channel for accurate frame sequence tracking.
     fn detect_loss(&mut self, current_latency: usize) -> usize {
         match self.last_latency {
             Some(last) if current_latency > last => {
@@ -177,6 +192,58 @@ impl Analyzer {
             }
             _ => 0,
         }
+    }
+
+    /// Detect frame loss by analyzing the counter channel
+    ///
+    /// The counter channel contains a sawtooth waveform (0.0 to 1.0) that
+    /// encodes a 16-bit frame counter. By tracking the sequence, we can
+    /// detect gaps indicating lost samples.
+    ///
+    /// This method provides accurate loss detection without the aliasing
+    /// artifacts that affect the latency-delta heuristic.
+    ///
+    /// # Arguments
+    /// * `counter_samples` - Samples from the counter channel (ch1)
+    ///
+    /// # Returns
+    /// Number of frames lost (gaps in the counter sequence)
+    pub fn detect_frame_loss(&mut self, counter_samples: &[f32]) -> usize {
+        if counter_samples.is_empty() {
+            return 0;
+        }
+
+        let mut total_lost = 0usize;
+
+        for &sample in counter_samples {
+            // Decode counter from normalized audio (0.0-1.0 → 0-65535)
+            // Clamp to valid range in case of noise
+            let normalized = sample.clamp(0.0, 1.0);
+            let received_counter = (normalized * 65536.0) as u32 & 0xFFFF;
+
+            if self.expected_frame > 0 {
+                let expected = (self.expected_frame & 0xFFFF) as u32;
+
+                // Calculate difference accounting for wrap-around
+                let diff = if received_counter >= expected {
+                    received_counter - expected
+                } else {
+                    // Wrap-around case
+                    (65536 + received_counter as u64 - expected as u64) as u32
+                };
+
+                // If diff > 1 and < 32768 (half range), we have a gap
+                // Large diffs (>32768) indicate backward movement, likely noise
+                if diff > 1 && diff < 32768 {
+                    total_lost += (diff - 1) as usize;
+                }
+            }
+
+            // Update expected for next sample (will be current + 1)
+            self.expected_frame = (received_counter as u64).wrapping_add(1);
+        }
+
+        total_lost
     }
 
     /// Get the configured sample rate
