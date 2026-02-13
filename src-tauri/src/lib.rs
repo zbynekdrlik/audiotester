@@ -8,6 +8,7 @@ pub mod tray;
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Run the Tauri application
 pub fn run() {
@@ -39,6 +40,18 @@ pub fn run() {
         });
     });
 
+    // Spawn auto-configure thread if env vars are set
+    if std::env::var("AUDIOTESTER_DEVICE").is_ok() || std::env::var("AUDIOTESTER_AUTO_START").is_ok()
+    {
+        let auto_engine = engine.clone();
+        std::thread::spawn(move || {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+            rt.block_on(async {
+                auto_configure(auto_engine).await;
+            });
+        });
+    }
+
     // Spawn the monitoring loop
     let monitor_state = state.clone();
     let monitor_engine = engine;
@@ -62,6 +75,62 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running Audiotester");
+}
+
+/// Auto-configure the engine from environment variables.
+///
+/// Reads `AUDIOTESTER_DEVICE`, `AUDIOTESTER_SAMPLE_RATE`, and
+/// `AUDIOTESTER_AUTO_START` to set up the audio engine without
+/// manual web UI interaction.
+async fn auto_configure(engine: EngineHandle) {
+    // Wait for ASIO subsystem to initialize
+    tokio::time::sleep(Duration::from_secs(2)).await;
+
+    // Set sample rate if specified
+    if let Ok(rate_str) = std::env::var("AUDIOTESTER_SAMPLE_RATE") {
+        if let Ok(rate) = rate_str.parse::<u32>() {
+            tracing::info!(sample_rate = rate, "Auto-configuring sample rate");
+            engine.set_sample_rate(rate).await;
+        } else {
+            tracing::warn!(value = %rate_str, "Invalid AUDIOTESTER_SAMPLE_RATE");
+        }
+    }
+
+    // Select device with retries
+    if let Ok(device_name) = std::env::var("AUDIOTESTER_DEVICE") {
+        tracing::info!(device = %device_name, "Auto-configuring device");
+        let mut selected = false;
+        for attempt in 1..=5 {
+            match engine.select_device(device_name.clone()).await {
+                Ok(()) => {
+                    tracing::info!(device = %device_name, attempt, "Device selected");
+                    selected = true;
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!(device = %device_name, attempt, error = %e, "Device selection failed, retrying...");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                }
+            }
+        }
+
+        if !selected {
+            tracing::error!(device = %device_name, "Failed to select device after 5 attempts");
+            return;
+        }
+    }
+
+    // Auto-start monitoring if requested
+    if std::env::var("AUDIOTESTER_AUTO_START")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+    {
+        tracing::info!("Auto-starting monitoring");
+        match engine.start().await {
+            Ok(()) => tracing::info!("Monitoring started successfully"),
+            Err(e) => tracing::error!(error = %e, "Failed to auto-start monitoring"),
+        }
+    }
 }
 
 /// Main monitoring loop - analyzes audio and broadcasts stats
