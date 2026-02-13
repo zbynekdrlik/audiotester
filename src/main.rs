@@ -270,6 +270,19 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
 
         // Skip analysis if not monitoring
         if use_tray && !tray_manager.is_monitoring() {
+            #[cfg(windows)]
+            {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+                };
+                unsafe {
+                    let mut msg = MSG::default();
+                    while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
+                        TranslateMessage(&msg);
+                        DispatchMessageW(&msg);
+                    }
+                }
+            }
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
@@ -327,6 +340,21 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
             if status_line != last_status {
                 println!("{}", status_line);
                 last_status = status_line;
+            }
+        }
+
+        // Process Windows messages (required for tray icon menu to work)
+        #[cfg(windows)]
+        {
+            use windows::Win32::UI::WindowsAndMessaging::{
+                DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+            };
+            unsafe {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
             }
         }
 
