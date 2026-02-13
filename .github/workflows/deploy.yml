@@ -63,7 +63,7 @@ jobs:
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "powershell -Command \"Set-Content -Path '${{ env.DEPLOY_PATH }}\start.bat' -Value '${{ env.DEPLOY_PATH }}\audiotester.exe -d \\\"VB-Matrix VASIO-8\\\" -r 96000'\""
+            "powershell -Command \"Set-Content -Path '${{ env.DEPLOY_PATH }}\start.bat' -Value '${{ env.DEPLOY_PATH }}\audiotester.exe'\""
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
@@ -101,3 +101,4 @@ jobs:
           echo "- **Version**: ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Target**: ${{ env.DEPLOY_HOST }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: Deployed and running" >> $GITHUB_STEP_SUMMARY
+          echo "- **Web UI**: http://${{ env.DEPLOY_HOST }}:8920" >> $GITHUB_STEP_SUMMARY

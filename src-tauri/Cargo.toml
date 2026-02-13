@@ -1,0 +1,38 @@
+[package]
+name = "audiotester-app"
+version = "0.1.5"
+edition = "2021"
+authors = ["Audiotester Team"]
+description = "Audiotester desktop application with Tauri 2"
+license = "MIT"
+default-run = "audiotester-app"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri framework
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-shell = "2"
+
+# Server crate
+audiotester-server = { path = "../crates/audiotester-server" }
+audiotester-core = { path = "../crates/audiotester-core" }
+
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "audiotester-app"
+path = "src/main.rs"

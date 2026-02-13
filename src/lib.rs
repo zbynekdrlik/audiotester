@@ -1,24 +1,12 @@
 //! Audiotester - Windows ASIO audio testing application
 //!
-//! This library provides functionality for monitoring professional audio paths
-//! including Dante, VBAN, and VBMatrix connections. It measures latency and
-//! detects sample loss using Maximum Length Sequence (MLS) test signals.
+//! This library re-exports the core audio engine, signal processing,
+//! and statistics functionality from `audiotester-core`.
+//!
+//! The UI has migrated to Tauri 2 + Leptos SSR (see `audiotester-server` and `src-tauri/`).
 
-pub mod audio;
-pub mod stats;
-pub mod ui;
+pub use audiotester_core::audio;
+pub use audiotester_core::stats;
 
-pub use audio::{analyzer::Analyzer, engine::AudioEngine, signal::MlsGenerator};
-pub use stats::store::StatsStore;
-
-/// Application version from Cargo.toml
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Default sample rate for audio processing (96kHz for professional setups)
-pub const DEFAULT_SAMPLE_RATE: u32 = 96000;
-
-/// MLS sequence order (2^ORDER - 1 samples)
-pub const MLS_ORDER: u32 = 15;
-
-/// MLS sequence length (32767 samples at order 15)
-pub const MLS_LENGTH: usize = (1 << MLS_ORDER) - 1;
+pub use audiotester_core::{Analyzer, AudioEngine, MlsGenerator, StatsStore};
+pub use audiotester_core::{DEFAULT_SAMPLE_RATE, MLS_LENGTH, MLS_ORDER, VERSION};

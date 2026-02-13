@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-Windows ASIO audio testing application for monitoring professional audio paths (Dante, VBAN, VBMatrix). The application runs as a system tray utility that sends test signals, receives looped audio, and compares them to detect latency issues and sample loss.
+Windows ASIO audio testing application for monitoring professional audio paths (Dante, VBAN, VBMatrix). The application runs as a Tauri 2 desktop app with system tray, web UI via Leptos SSR on Axum, and remote access from any browser on the LAN.
 
 ## Temporary Approvals
 
@@ -32,7 +32,7 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 ## Code Standards
 
 - Run `cargo fmt` before every commit
-- Run `cargo clippy -- -D warnings` and fix all warnings
+- Run `cargo clippy --workspace -- -D warnings` and fix all warnings
 - All public functions must have doc comments with examples where appropriate
 - E2E tests required for new features before merging
 - Use `thiserror` for custom error types, `anyhow` for application errors
@@ -41,30 +41,70 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 ## Architecture
 
 ```
-src/
-├── main.rs          # Entry point, tray setup, event loop
-├── lib.rs           # Library root, exports public API
-├── audio/
-│   ├── engine.rs    # ASIO device management, stream handling
-│   ├── signal.rs    # MLS generation, test signal creation
-│   └── analyzer.rs  # Cross-correlation, latency/loss detection
-├── ui/
-│   ├── tray.rs      # System tray icon, menu, status colors
-│   └── stats_window.rs  # Statistics GUI with graphs
-└── stats/
-    └── store.rs     # Time-series data storage for metrics
+audiotester/                       # Workspace root
+├── Cargo.toml                     # Workspace definition
+├── src/lib.rs                     # Re-exports audiotester-core (for test compat)
+├── tests/                         # Existing E2E + integration tests
+│   ├── e2e_signal.rs
+│   ├── e2e_latency.rs
+│   ├── e2e_loss.rs
+│   └── integration/audio_loop.rs
+│
+├── crates/
+│   ├── audiotester-core/          # Core audio engine + signal processing
+│   │   └── src/
+│   │       ├── lib.rs
+│   │       ├── audio/
+│   │       │   ├── engine.rs      # ASIO device management, streams
+│   │       │   ├── signal.rs      # MLS generation
+│   │       │   └── analyzer.rs    # FFT cross-correlation
+│   │       └── stats/
+│   │           └── store.rs       # Time-series data storage
+│   │
+│   └── audiotester-server/        # Axum + Leptos SSR web server
+│       └── src/
+│           ├── lib.rs             # Router, AppState, EngineHandle
+│           ├── api.rs             # REST endpoints (/api/v1/*)
+│           ├── ws.rs              # WebSocket handler
+│           └── ui/
+│               ├── dashboard.rs   # Leptos SSR dashboard page
+│               ├── settings.rs    # Leptos SSR settings page
+│               ├── components/    # Reusable Leptos components
+│               ├── styles/        # CSS (included via include_str!)
+│               └── scripts/       # JS (included via include_str!)
+│
+└── src-tauri/                     # Tauri 2 desktop shell
+    ├── tauri.conf.json            # NSIS installer, window config
+    └── src/
+        ├── main.rs                # Entry point
+        ├── lib.rs                 # App setup, server spawn, monitoring loop
+        └── tray.rs                # Tray icon + menu
+```
+
+### Access Paths
+
+```
+Axum Server (0.0.0.0:8920)
+├── Leptos SSR pages (server-rendered HTML + embedded JS)
+├── REST API (/api/v1/stats, /api/v1/devices, ...)
+├── WebSocket (/api/v1/ws) for real-time push
+│
+├── Tauri Webview → localhost:8920        ← desktop (tray click)
+├── Chrome on laptop → iem.lan:8920      ← remote debugging
+└── Phone browser → 192.168.x.x:8920    ← remote monitoring
 ```
 
 ## Key Dependencies
 
-| Crate                 | Purpose                     |
-| --------------------- | --------------------------- |
-| `cpal` (ASIO feature) | Audio I/O with ASIO backend |
-| `tray-icon`           | System tray icon and menu   |
-| `egui`/`eframe`       | Immediate mode GUI          |
-| `egui_plot`           | Real-time charts and graphs |
-| `ringbuf`             | Lock-free audio buffers     |
-| `rustfft`             | FFT-based cross-correlation |
+| Crate                 | Purpose                         |
+| --------------------- | ------------------------------- |
+| `cpal` (ASIO feature) | Audio I/O with ASIO backend     |
+| `tauri` 2             | Desktop shell, tray, installer  |
+| `axum` 0.8            | Web server, REST API, WebSocket |
+| `leptos` 0.7 (SSR)    | Server-side HTML rendering      |
+| `ringbuf`             | Lock-free audio buffers         |
+| `rustfft`             | FFT-based cross-correlation     |
+| `tower-http`          | Static file serving             |
 
 ## Build Requirements
 
@@ -120,22 +160,33 @@ The CI workflow will FAIL if:
 
 ### E2E Tests (Highest Priority)
 
-- `tests/e2e/signal_test.rs` - MLS generation and properties
-- `tests/e2e/latency_test.rs` - Latency measurement accuracy
-- `tests/e2e/loss_test.rs` - Sample loss detection
+- `tests/e2e_signal.rs` - MLS generation and properties (10 tests)
+- `tests/e2e_latency.rs` - Latency measurement accuracy (11 tests)
+- `tests/e2e_loss.rs` - Sample loss detection (11 tests)
 
 ### Integration Tests
 
 - `tests/integration/audio_loop.rs` - Full audio path (mocked ASIO)
 
+### Unit Tests
+
+- `crates/audiotester-core/` - Audio engine, signal, analyzer, stats (21 tests)
+- `crates/audiotester-server/` - API serialization tests (4 tests)
+
 ### Running Tests
 
 ```bash
-# All tests
-cargo test --all-features
+# All workspace tests
+cargo test --workspace
+
+# Core library only
+cargo test -p audiotester-core
+
+# Server only
+cargo test -p audiotester-server
 
 # E2E only
-cargo test --test e2e_*
+cargo test --test 'e2e_*'
 
 # With output
 cargo test -- --nocapture
@@ -169,22 +220,23 @@ latency_ms = latency_samples / sample_rate * 1000
 1. Ensure you are on `dev` branch: `git checkout dev && git pull`
 2. Write E2E tests first
 3. Implement feature
-4. Run `cargo fmt && cargo clippy -- -D warnings`
-5. Run `cargo test`
+4. Run `cargo fmt && cargo clippy --workspace -- -D warnings`
+5. Run `cargo test --workspace`
 6. Commit with descriptive message: `git commit -m "Add feature X"`
 7. Push to dev: `git push origin dev`
 8. When ready for release, open PR from `dev` to `main`
 
 ### Debugging Audio Issues
 
-- Enable trace logging: `RUST_LOG=audiotester=trace cargo run`
+- Enable trace logging: `RUST_LOG=audiotester=trace cargo run -p audiotester-app`
 - Check ASIO device list: Look for "ASIO" in device names
 - Verify sample rate matches between devices
+- Check web UI at http://localhost:8920
 
 ## Performance Targets
 
 - Audio callback: < 1ms processing time
-- UI updates: 60 FPS in stats window
+- Web UI: responsive on mobile browsers
 - Memory: < 50MB typical usage
 - CPU: < 5% during monitoring
 
@@ -195,16 +247,16 @@ latency_ms = latency_samples / sample_rate * 1000
 ### What CI/CD Does
 
 - `ci.yml` - Runs on every push to `dev` and PRs to `main`:
-  - Format check (`cargo fmt`)
-  - Lint check (`cargo clippy`)
-  - Build (debug + release)
-  - Unit tests
+  - Format check (`cargo fmt --all`)
+  - Lint check (`cargo clippy --workspace`)
+  - Build workspace (debug + release)
+  - Unit tests (all workspace crates)
   - E2E tests
   - Branch policy enforcement
 
 - `auto-release.yml` - Runs automatically on push to `main` (after PR merge):
   - Determines next version (auto-increments patch from latest tag)
-  - Builds Windows release binary
+  - Builds Tauri app release binary
   - Creates git tag and GitHub Release
   - Deploys to test machine (iem.lan) via self-hosted runner
 
@@ -237,12 +289,14 @@ Code → Push to dev → CI builds & tests → PR to main → CI validates → M
 | Username | `iem`                                                 |
 | Password | `iem`                                                 |
 | Purpose  | **Testing compiled releases with real ASIO hardware** |
+| Web UI   | `http://iem.lan:8920`                                 |
 
 ### What To Do On Test Machine
 
 - Download releases from GitHub
 - Run compiled `audiotester.exe`
 - Test with real ASIO audio loopback
+- Access web UI at http://iem.lan:8920
 - Report issues back
 
 ### What NEVER To Do On Test Machine
@@ -255,8 +309,7 @@ Code → Push to dev → CI builds & tests → PR to main → CI validates → M
 ### Testing Workflow
 
 1. CI/CD builds release on GitHub
-2. Download release artifact from GitHub
-3. Copy to test machine: `scp audiotester.exe iem@iem.lan:~/`
-4. SSH and run: `ssh iem@iem.lan` then `.\audiotester.exe`
-5. Test with real ASIO loopback
-6. Report results
+2. Auto-deploy copies to iem.lan
+3. Access web UI: http://iem.lan:8920
+4. Test with real ASIO loopback
+5. Report results

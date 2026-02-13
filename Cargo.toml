@@ -1,3 +1,11 @@
+[workspace]
+members = [
+    "crates/audiotester-core",
+    "crates/audiotester-server",
+    "src-tauri",
+]
+resolver = "2"
+
 [package]
 name = "audiotester"
 version = "0.1.5"
@@ -10,54 +18,10 @@ keywords = ["audio", "asio", "testing", "windows", "latency"]
 categories = ["multimedia::audio"]
 
 [dependencies]
-# Audio I/O with ASIO support
-cpal = { version = "0.15", features = ["asio"] }
-
-# System tray (Tauri team's crate)
-tray-icon = "0.19"
-
-# GUI framework
-eframe = "0.29"
-egui = "0.29"
-egui_plot = "0.29"
-
-# Lock-free ring buffer for audio
-ringbuf = "0.4"
-
-# FFT for cross-correlation
-rustfft = "6.2"
-
-# Error handling
-anyhow = "1.0"
-thiserror = "2.0"
-
-# Logging
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Async runtime for event handling
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
-
-# Serialization for config
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Time handling
-chrono = { version = "0.4", features = ["serde"] }
-
-# Signal handling (Ctrl+C)
-ctrlc = "3.4"
-
-# Windows-specific dependencies
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
-    "Win32_Foundation",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_Graphics_Gdi",
-] }
+# Core library (re-exported for backward compatibility with tests)
+audiotester-core = { path = "crates/audiotester-core" }
 
 [dev-dependencies]
-# Testing utilities
 approx = "0.5"
 tempfile = "3.14"
 
@@ -72,9 +36,3 @@ strip = true
 
 [profile.dev]
 opt-level = 1
-
-# ASIO SDK configuration
-# Set CPAL_ASIO_DIR environment variable to ASIO SDK path
-# or use automatic download with:
-# [env]
-# CPAL_ASIO_DYNAMIC_LINK = "1"
