@@ -138,17 +138,23 @@ jobs:
           unzip -o release.zip -d release/
           ls -la release/
 
-      - name: Deploy to test machine
+      - name: Stop running instance
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
+          # Wait for process to fully exit
+          sleep 2
+
+      - name: Deploy files
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
             "if not exist \"C:\Users\iem\audiotester\" mkdir \"C:\Users\iem\audiotester\""
-
-          sshpass -e ssh -o StrictHostKeyChecking=no \
-            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
 
           sshpass -e scp -o StrictHostKeyChecking=no \
             release/audiotester.exe \
@@ -158,15 +164,53 @@ jobs:
             release/README.md \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}:C:/Users/iem/audiotester/" 2>/dev/null || true
 
-          echo "Deployment complete!"
+      - name: Create start script and scheduled task
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          # Create start.bat with correct device and sample rate
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "powershell -Command \"Set-Content -Path 'C:\Users\iem\audiotester\start.bat' -Value 'C:\Users\iem\audiotester\audiotester.exe -d \\\"VB-Matrix VASIO-8\\\" -r 96000'\""
 
-      - name: Verify deployment
+          # Create/update scheduled task to run in interactive desktop session
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+
+      - name: Start application
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "dir \"C:\Users\iem\audiotester\" && \"C:\Users\iem\audiotester\\audiotester.exe\" --version 2>nul || echo 'Version check not supported'"
+            "schtasks /Run /TN audiotester"
+          # Wait for process to start
+          sleep 5
+
+      - name: Verify deployment
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          echo "Verifying deployment..."
+          # Check process is running in interactive session
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'NOT_FOUND'")
+
+          echo "Process check: $RESULT"
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            echo "audiotester.exe is running"
+          else
+            echo "::error::audiotester.exe is NOT running after deploy!"
+            exit 1
+          fi
+
+          # Check it's in the interactive session (Console)
+          SESSION=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH" | cut -d',' -f3)
+          echo "Session: $SESSION"
 
       - name: Summary
         run: |
@@ -174,4 +218,5 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
           echo "- **Version**: v${{ needs.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Target**: iem.lan" >> $GITHUB_STEP_SUMMARY
-          echo "- **Status**: Deployed" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: Deployed and running" >> $GITHUB_STEP_SUMMARY
+          echo "- **App**: Started in interactive desktop session" >> $GITHUB_STEP_SUMMARY
