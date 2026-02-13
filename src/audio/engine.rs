@@ -262,24 +262,18 @@ impl AudioEngine {
                 .map(|c| (c.sample_rate().0, c.channels()))
         );
 
-        // Always use configured sample rate (default 96kHz)
-        // ASIO devices like VASIO-8 may report incorrect default rates (44100Hz)
-        // but actually run at the rate configured in their control panel (96kHz)
+        // Use configured sample rate, with fallback to device default
+        let device_rate = default_output
+            .as_ref()
+            .map(|c| c.sample_rate().0)
+            .unwrap_or(self.sample_rate);
         let actual_sample_rate = self.sample_rate;
         tracing::info!("Using configured sample rate: {} Hz", actual_sample_rate);
-
-        // Log warning if device reports a different rate
-        if let Ok(ref cfg) = default_output {
-            let device_rate = cfg.sample_rate().0;
-            if device_rate > 0 && device_rate != actual_sample_rate {
-                tracing::warn!(
-                    "Device reports default {} Hz, but using configured {} Hz. \
-                     Ensure VBMatrix/ASIO control panel is set to {} Hz.",
-                    device_rate,
-                    actual_sample_rate,
-                    actual_sample_rate
-                );
-            }
+        if device_rate != actual_sample_rate {
+            tracing::info!(
+                "Device default rate: {} Hz (will fallback if configured rate fails)",
+                device_rate
+            );
         }
 
         // Get device channel counts
@@ -292,20 +286,57 @@ impl AudioEngine {
             input_channels
         );
 
-        // Create output stream config with all device channels
-        // Signal will be sent on channel 0 (user's "channel 1"), others get silence
-        let output_config = StreamConfig {
+        // Try configured rate first, fall back to device default if it fails
+        let rates_to_try = if device_rate != actual_sample_rate {
+            vec![actual_sample_rate, device_rate]
+        } else {
+            vec![actual_sample_rate]
+        };
+
+        let mut effective_rate = actual_sample_rate;
+        let mut output_config = StreamConfig {
             channels: output_channels,
             sample_rate: SampleRate(actual_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
-
-        // Create input stream config (mono is fine for receiving loopback)
-        let input_config = StreamConfig {
+        let mut input_config = StreamConfig {
             channels: 1,
             sample_rate: SampleRate(actual_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
+
+        // Test which sample rate works by trying a dummy build
+        for &rate in &rates_to_try {
+            output_config.sample_rate = SampleRate(rate);
+            input_config.sample_rate = SampleRate(rate);
+            match device.build_output_stream(
+                &output_config,
+                |_: &mut [f32], _: &cpal::OutputCallbackInfo| {},
+                |_| {},
+                None,
+            ) {
+                Ok(_stream) => {
+                    effective_rate = rate;
+                    if rate != actual_sample_rate {
+                        tracing::warn!(
+                            "Configured rate {} Hz failed, using device default {} Hz",
+                            actual_sample_rate,
+                            rate
+                        );
+                    }
+                    break;
+                }
+                Err(e) => {
+                    tracing::warn!("Sample rate {} Hz failed: {}", rate, e);
+                    continue;
+                }
+            }
+        }
+
+        // Update configs with the effective rate
+        output_config.sample_rate = SampleRate(effective_rate);
+        input_config.sample_rate = SampleRate(effective_rate);
+        tracing::info!("Effective sample rate: {} Hz", effective_rate);
 
         // Create ring buffer for input samples
         let ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
@@ -314,7 +345,7 @@ impl AudioEngine {
         // Create shared state
         let generator = MlsGenerator::new(crate::MLS_ORDER);
         let reference = generator.sequence().to_vec();
-        let analyzer = Analyzer::new(&reference, self.sample_rate);
+        let analyzer = Analyzer::new(&reference, effective_rate);
 
         let shared_state = Arc::new(SharedState {
             generator: Mutex::new(generator),
@@ -417,11 +448,12 @@ impl AudioEngine {
         self.shared_state = Some(shared_state);
         self.input_consumer = Some(consumer);
         self.state = EngineState::Running;
+        self.sample_rate = effective_rate;
 
         tracing::info!(
             "Audio engine started: {} @ {}Hz",
             self.device_name.as_deref().unwrap_or("unknown"),
-            self.sample_rate
+            effective_rate
         );
 
         Ok(())
