@@ -7,9 +7,12 @@ pub mod tray;
 
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Listener, Manager};
+
+/// Global AppHandle storage for cross-thread tray updates
+static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
 /// Run the Tauri application
 pub fn run() {
@@ -77,9 +80,27 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let handle = app.handle().clone();
+
+            // Store AppHandle globally for monitoring loop access
+            let _ = APP_HANDLE.set(handle.clone());
+
+            // Setup tray
             if let Err(e) = tray::setup_tray(&handle) {
                 tracing::error!("Failed to setup tray: {}", e);
             }
+
+            // Listen for tray status events from monitoring loop
+            let tray_handle = handle.clone();
+            handle.listen("tray-status", move |event| {
+                if let Ok(payload) = serde_json::from_str::<tray::TrayStatusEvent>(event.payload())
+                {
+                    let status = payload.to_tray_status();
+                    if let Err(e) = tray::update_tray_status(&tray_handle, status) {
+                        tracing::warn!("Failed to update tray: {}", e);
+                    }
+                }
+            });
+
             Ok(())
         })
         .run(tauri::generate_context!())
@@ -145,6 +166,7 @@ async fn auto_configure(engine: EngineHandle) {
 /// Main monitoring loop - analyzes audio and broadcasts stats
 async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
+    let mut last_status = tray::TrayStatus::Disconnected;
 
     loop {
         interval.tick().await;
@@ -164,6 +186,35 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
             // Broadcast to WebSocket clients
             audiotester_server::ws::broadcast_stats(&state);
+
+            // Update tray icon status (only if changed to reduce overhead)
+            let new_status = tray::status_from_analysis(
+                result.latency_ms,
+                result.lost_samples as u64,
+                result.corrupted_samples as u64,
+            );
+
+            if new_status != last_status {
+                last_status = new_status;
+
+                // Emit tray status event if app handle is available
+                if let Some(app) = APP_HANDLE.get() {
+                    let event = tray::TrayStatusEvent {
+                        status: match new_status {
+                            tray::TrayStatus::Ok => "ok".to_string(),
+                            tray::TrayStatus::Warning => "warning".to_string(),
+                            tray::TrayStatus::Error => "error".to_string(),
+                            tray::TrayStatus::Disconnected => "disconnected".to_string(),
+                        },
+                        latency_ms: result.latency_ms,
+                        lost_samples: result.lost_samples as u64,
+                    };
+
+                    if let Err(e) = app.emit("tray-status", event) {
+                        tracing::warn!("Failed to emit tray status event: {}", e);
+                    }
+                }
+            }
         }
     }
 }

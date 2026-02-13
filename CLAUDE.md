@@ -38,6 +38,42 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 - Use `thiserror` for custom error types, `anyhow` for application errors
 - Prefer `tracing` over `println!` for logging
 
+## Strict CI/CD Requirements
+
+### Zero Tolerance Policy
+
+- **NO skipped tests** - All tests must run, no `#[ignore]` without explicit approval
+- **NO false positives** - Tests must fail on actual regressions, never pass incorrectly
+- **NO ignored failures** - Every CI job must pass for PR to be green
+- **Hardware verification required** - Deploy smoke tests on iem.lan must pass
+
+### Meta-Test Requirements
+
+- Run `tests/meta_tests.rs` to verify test suite integrity
+- No PRs merge if any tests are skipped or ignored
+- Latency measurements must be bounded (no aliasing artifacts)
+- Loss detection must be accurate (no false positives from latency cycling)
+
+### CI Gate Rules
+
+| Check      | Blocking? | Description                   |
+| ---------- | --------- | ----------------------------- |
+| fmt        | Yes       | Code must be formatted        |
+| clippy     | Yes       | No warnings allowed           |
+| build      | Yes       | Must compile                  |
+| test       | Yes       | All unit tests pass           |
+| e2e        | Yes       | All E2E tests pass            |
+| playwright | Yes       | All browser tests pass        |
+| deploy-dev | Yes       | Hardware smoke tests pass     |
+| meta-tests | Yes       | Test suite integrity verified |
+
+### Audio Measurement Quality Standards
+
+- **Latency**: Must be stable 1-50ms range for loopback, no cycling
+- **Sample loss**: Must be zero for healthy connections
+- **Confidence**: Cross-correlation confidence > 0.5 for valid measurements
+- **Tray icon**: Must reflect actual status (green/orange/red/gray)
+
 ## Architecture
 
 ```
