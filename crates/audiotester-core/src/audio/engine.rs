@@ -300,7 +300,7 @@ impl AudioEngine {
             buffer_size: cpal::BufferSize::Default,
         };
         let mut input_config = StreamConfig {
-            channels: 1,
+            channels: input_channels,
             sample_rate: SampleRate(actual_sample_rate),
             buffer_size: cpal::BufferSize::Default,
         };
@@ -406,26 +406,36 @@ impl AudioEngine {
         // Create input stream
         let input_producer = Arc::new(Mutex::new(producer));
         let input_state = Arc::clone(&shared_state);
+        let num_input_channels = input_channels as usize;
 
         let input_stream = device.build_input_stream(
             &input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
                     if let Ok(mut prod) = input_producer.lock() {
-                        // Push samples to ring buffer (drop oldest if full)
-                        for &sample in data {
-                            let _ = prod.try_push(sample);
+                        // Data is interleaved: [ch0, ch1, ch2, ..., ch0, ch1, ...]
+                        // Extract channel 0 (user's "channel 1") only
+                        for frame in data.chunks(num_input_channels) {
+                            if !frame.is_empty() {
+                                let _ = prod.try_push(frame[0]);
+                            }
                         }
-                        // Track input samples for debugging
+                        // Track input samples (count frames, not total samples)
+                        let frame_count = data.len() / num_input_channels;
                         let prev = input_state
                             .input_samples
-                            .fetch_add(data.len(), Ordering::Relaxed);
+                            .fetch_add(frame_count, Ordering::Relaxed);
                         // Log first callback to confirm input is working
                         if prev == 0 {
-                            let max_level = data.iter().map(|x| x.abs()).fold(0.0f32, f32::max);
+                            let max_level = data
+                                .chunks(num_input_channels)
+                                .filter_map(|f| f.first())
+                                .map(|x| x.abs())
+                                .fold(0.0f32, f32::max);
                             tracing::info!(
-                                "Input callback started: {} samples, max level: {:.4}",
-                                data.len(),
+                                "Input callback started: {} frames ({} channels), ch0 max level: {:.4}",
+                                frame_count,
+                                num_input_channels,
                                 max_level
                             );
                         }
