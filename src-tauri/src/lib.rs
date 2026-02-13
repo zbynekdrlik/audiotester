@@ -7,6 +7,7 @@ pub mod tray;
 
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
+use tauri::Manager;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -66,6 +67,13 @@ pub fn run() {
 
     // Build and run Tauri app
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            // Focus existing window when second instance tries to start
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_focus();
+                let _ = window.show();
+            }
+        }))
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
             let handle = app.handle().clone();

@@ -263,35 +263,51 @@ jobs:
             exit 1
           fi
 
-          # Check device is selected (auto-configure should have run)
-          DEVICE=$(echo "$STATUS" | jq -r '.device // empty')
-          if [ -n "$DEVICE" ]; then
-            echo "Device selected: $DEVICE"
-          else
-            echo "::warning::No device selected yet (auto-configure may still be running)"
-          fi
-
-      - name: Smoke test - Latency measurement
+      - name: Smoke test - Verify VASIO-8 connection
         run: |
-          echo "Waiting for analysis cycles..."
-          sleep 15
-          STATS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/stats")
-          echo "Stats: $STATS"
+          sleep 15  # Wait for auto-configure + initial analysis cycles
+          STATUS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/status")
+          echo "Status: $STATUS"
 
-          LATENCY=$(echo "$STATS" | jq '.current_latency')
-          MEASUREMENTS=$(echo "$STATS" | jq '.measurement_count')
-          echo "Current latency: ${LATENCY}ms, Measurements: $MEASUREMENTS"
+          DEVICE=$(echo "$STATUS" | jq -r '.device // empty')
+          MONITORING=$(echo "$STATUS" | jq -r '.monitoring')
 
-          if [ "$MEASUREMENTS" -gt 0 ] 2>/dev/null; then
-            echo "Audio monitoring is producing measurements"
-            if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 50) ? 0 : 1}'; then
-              echo "Latency is in expected range (0-50ms)"
-            else
-              echo "::warning::Latency $LATENCY ms is outside expected range"
-            fi
-          else
-            echo "::warning::No measurements yet - device may not be ready"
+          if ! echo "$DEVICE" | grep -qi "vasio"; then
+            echo "::error::Device does not contain 'VASIO': $DEVICE"
+            exit 1
           fi
+          echo "Device: $DEVICE"
+
+          if [ "$MONITORING" != "true" ]; then
+            echo "::error::Monitoring is not running"
+            exit 1
+          fi
+          echo "Monitoring: active"
+
+          # Take two measurements 10s apart to check latency stability and sample loss rate
+          STATS1=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/stats")
+          LOST1=$(echo "$STATS1" | jq '.total_lost // 0')
+          sleep 10
+          STATS2=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/stats")
+          echo "Stats: $STATS2"
+          LATENCY=$(echo "$STATS2" | jq '.current_latency')
+          LOST2=$(echo "$STATS2" | jq '.total_lost // 0')
+
+          LOST_DIFF=$((LOST2 - LOST1))
+          echo "Latency: ${LATENCY}ms, Lost in 10s: $LOST_DIFF"
+
+          if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 50) ? 0 : 1}'; then
+            echo "Latency is in expected loopback range (0-50ms)"
+          else
+            echo "::error::Latency ${LATENCY}ms is outside expected range (0-50ms)"
+            exit 1
+          fi
+
+          if [ "$LOST_DIFF" -gt 1000 ]; then
+            echo "::error::Too many lost samples in 10s: $LOST_DIFF"
+            exit 1
+          fi
+          echo "Sample loss rate acceptable: $LOST_DIFF in 10s"
 
       - name: Summary
         run: |
