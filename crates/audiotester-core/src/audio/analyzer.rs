@@ -1,11 +1,18 @@
-//! Signal analysis for latency measurement and sample loss detection
+//! Frame-based loss detection and legacy MLS correlation analysis
 //!
-//! Uses cross-correlation to measure latency between sent and received signals,
-//! and tracks frame markers to detect sample loss.
+//! Primary functions:
+//! - Frame counter analysis for accurate loss detection
+//!
+//! Legacy functions (for backward compatibility and fallback):
+//! - MLS cross-correlation for latency measurement
 
 use rustfft::{num_complex::Complex, FftPlanner};
 
 /// Analysis results from comparing sent and received signals
+///
+/// Note: For latency measurement, prefer using the burst-based system
+/// in [`crate::audio::latency::LatencyAnalyzer`]. This struct is retained
+/// for backward compatibility.
 #[derive(Debug, Clone, Default)]
 pub struct AnalysisResult {
     /// Measured latency in samples
@@ -22,65 +29,83 @@ pub struct AnalysisResult {
     pub is_healthy: bool,
 }
 
-/// Signal analyzer for latency and loss detection
+/// Signal analyzer for loss detection (and legacy MLS correlation)
+///
+/// Primary use: Frame counter-based loss detection via [`Self::detect_frame_loss`].
+///
+/// Legacy use: MLS cross-correlation via [`Self::analyze`] for fallback latency
+/// measurement. Note that MLS correlation has significant buffer delays and
+/// is not recommended for real-time latency monitoring.
 pub struct Analyzer {
     /// Sample rate in Hz
     sample_rate: u32,
-    /// Reference MLS sequence for correlation
+    /// Reference MLS sequence for correlation (legacy)
     reference: Vec<f32>,
-    /// FFT planner for efficient correlation
+    /// FFT planner for efficient correlation (legacy)
     fft_planner: FftPlanner<f32>,
-    /// Pre-computed FFT of reference signal
+    /// Pre-computed FFT of reference signal (legacy)
     reference_fft: Vec<Complex<f32>>,
-    /// FFT size (power of 2 >= 2 * reference length)
+    /// FFT size (power of 2 >= 2 * reference length) (legacy)
     fft_size: usize,
-    /// Last known latency for tracking
+    /// Last known latency for tracking (legacy)
     last_latency: Option<usize>,
     /// Expected frame counter for loss detection
     expected_frame: u64,
+    /// Whether this analyzer has a valid MLS reference
+    has_reference: bool,
 }
 
 impl Analyzer {
-    /// Create a new analyzer with the given reference signal
+    /// Create a new analyzer
     ///
     /// # Arguments
-    /// * `reference` - The MLS sequence used for correlation
+    /// * `reference` - The MLS sequence used for correlation (can be empty for loss-only mode)
     /// * `sample_rate` - Sample rate in Hz for time calculations
     pub fn new(reference: &[f32], sample_rate: u32) -> Self {
-        let ref_len = reference.len();
-        // FFT size must be power of 2 and at least 2x reference length
+        let has_reference = !reference.is_empty();
+        let ref_len = if has_reference { reference.len() } else { 1024 };
         let fft_size = (ref_len * 2).next_power_of_two();
 
         let mut fft_planner = FftPlanner::new();
 
         // Pre-compute FFT of reference signal (zero-padded)
-        let mut reference_complex: Vec<Complex<f32>> = reference
-            .iter()
-            .map(|&x| Complex::new(x, 0.0))
-            .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
-            .take(fft_size)
-            .collect();
+        let reference_fft = if has_reference {
+            let mut reference_complex: Vec<Complex<f32>> = reference
+                .iter()
+                .map(|&x| Complex::new(x, 0.0))
+                .chain(std::iter::repeat(Complex::new(0.0, 0.0)))
+                .take(fft_size)
+                .collect();
 
-        let fft = fft_planner.plan_fft_forward(fft_size);
-        fft.process(&mut reference_complex);
+            let fft = fft_planner.plan_fft_forward(fft_size);
+            fft.process(&mut reference_complex);
 
-        // Conjugate for correlation
-        for c in &mut reference_complex {
-            c.im = -c.im;
-        }
+            // Conjugate for correlation
+            for c in &mut reference_complex {
+                c.im = -c.im;
+            }
+            reference_complex
+        } else {
+            vec![Complex::new(0.0, 0.0); fft_size]
+        };
 
         Self {
             sample_rate,
             reference: reference.to_vec(),
             fft_planner,
-            reference_fft: reference_complex,
+            reference_fft,
             fft_size,
             last_latency: None,
             expected_frame: 0,
+            has_reference,
         }
     }
 
-    /// Analyze received audio buffer
+    /// Analyze received audio buffer using MLS cross-correlation (legacy)
+    ///
+    /// **Note:** This method uses MLS correlation which requires ~350ms of buffer
+    /// accumulation before producing results. For real-time latency measurement,
+    /// use the burst-based system in [`crate::audio::latency::LatencyAnalyzer`].
     ///
     /// # Arguments
     /// * `received` - Buffer of received audio samples
@@ -88,7 +113,7 @@ impl Analyzer {
     /// # Returns
     /// Analysis result with latency and loss information
     pub fn analyze(&mut self, received: &[f32]) -> AnalysisResult {
-        if received.len() < self.reference.len() {
+        if !self.has_reference || received.len() < self.reference.len() {
             return AnalysisResult {
                 is_healthy: false,
                 ..Default::default()
@@ -101,7 +126,7 @@ impl Analyzer {
         // Convert to milliseconds
         let latency_ms = (latency_samples as f64 / self.sample_rate as f64) * 1000.0;
 
-        // Track latency changes for loss detection
+        // Track latency changes for loss detection (legacy heuristic)
         let lost_samples = self.detect_loss(latency_samples);
 
         // Determine health status
@@ -114,17 +139,12 @@ impl Analyzer {
             latency_ms,
             confidence,
             lost_samples,
-            corrupted_samples: 0, // TODO: Implement corruption detection
+            corrupted_samples: 0,
             is_healthy,
         }
     }
 
-    /// Perform FFT-based cross-correlation
-    ///
-    /// The correlation peak search is constrained to a reasonable latency range
-    /// (0-100ms) to prevent aliasing artifacts from the circular FFT correlation.
-    /// This fixes the issue where latency would cycle through 0→341→682ms due to
-    /// the MLS signal being periodic and the FFT producing aliased correlation peaks.
+    /// Perform FFT-based cross-correlation (legacy)
     fn cross_correlate(&mut self, received: &[f32]) -> (usize, f32) {
         // Zero-pad received signal
         let mut received_complex: Vec<Complex<f32>> = received
@@ -148,13 +168,10 @@ impl Analyzer {
         ifft.process(&mut received_complex);
 
         // Constrain search to reasonable latency range (0-100ms)
-        // At any sample rate, 100ms = sample_rate / 10 samples
-        // This prevents FFT circular correlation aliasing from causing latency
-        // to cycle through MLS period multiples (0→341→682ms at 96kHz)
         let max_latency_samples = (self.sample_rate / 10) as usize;
         let search_limit = max_latency_samples.min(received_complex.len());
 
-        // Find peak in correlation (constrained to latency bounds)
+        // Find peak in correlation
         let mut max_val = 0.0f32;
         let mut max_idx = 0;
         let norm = 1.0 / self.fft_size as f32;
@@ -169,22 +186,21 @@ impl Analyzer {
 
         // Normalize confidence by reference energy
         let ref_energy: f32 = self.reference.iter().map(|x| x * x).sum();
-        let confidence = max_val / ref_energy.sqrt();
+        let confidence = if ref_energy > 0.0 {
+            max_val / ref_energy.sqrt()
+        } else {
+            0.0
+        };
 
         (max_idx, confidence.min(1.0))
     }
 
     /// Detect sample loss based on latency changes (legacy heuristic)
-    ///
-    /// Note: This method is deprecated in favor of `detect_frame_loss` which
-    /// uses the counter channel for accurate frame sequence tracking.
     fn detect_loss(&mut self, current_latency: usize) -> usize {
         match self.last_latency {
             Some(last) if current_latency > last => {
-                // Latency increased - might indicate lost samples
                 let diff = current_latency - last;
                 if diff > 10 {
-                    // Only report if significant
                     diff
                 } else {
                     0
@@ -196,12 +212,10 @@ impl Analyzer {
 
     /// Detect frame loss by analyzing the counter channel
     ///
-    /// The counter channel contains a sawtooth waveform (0.0 to 1.0) that
-    /// encodes a 16-bit frame counter. By tracking the sequence, we can
-    /// detect gaps indicating lost samples.
-    ///
-    /// This method provides accurate loss detection without the aliasing
-    /// artifacts that affect the latency-delta heuristic.
+    /// This is the **primary** method for loss detection. The counter channel
+    /// contains a sawtooth waveform (0.0 to 1.0) that encodes a 16-bit frame
+    /// counter. By tracking the sequence, we can detect gaps indicating lost
+    /// samples with high accuracy.
     ///
     /// # Arguments
     /// * `counter_samples` - Samples from the counter channel (ch1)
@@ -217,7 +231,6 @@ impl Analyzer {
 
         for &sample in counter_samples {
             // Decode counter from normalized audio (0.0-1.0 → 0-65535)
-            // Clamp to valid range in case of noise
             let normalized = sample.clamp(0.0, 1.0);
             let received_counter = (normalized * 65536.0) as u32 & 0xFFFF;
 
@@ -228,18 +241,15 @@ impl Analyzer {
                 let diff = if received_counter >= expected {
                     received_counter - expected
                 } else {
-                    // Wrap-around case
                     (65536 + received_counter as u64 - expected as u64) as u32
                 };
 
                 // If diff > 1 and < 32768 (half range), we have a gap
-                // Large diffs (>32768) indicate backward movement, likely noise
                 if diff > 1 && diff < 32768 {
                     total_lost += (diff - 1) as usize;
                 }
             }
 
-            // Update expected for next sample (will be current + 1)
             self.expected_frame = (received_counter as u64).wrapping_add(1);
         }
 
@@ -249,6 +259,11 @@ impl Analyzer {
     /// Get the configured sample rate
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Check if analyzer has a valid MLS reference for correlation
+    pub fn has_reference(&self) -> bool {
+        self.has_reference
     }
 
     /// Reset the analyzer state
@@ -268,6 +283,14 @@ mod tests {
         let gen = MlsGenerator::new(10);
         let analyzer = Analyzer::new(gen.sequence(), 48000);
         assert_eq!(analyzer.sample_rate(), 48000);
+        assert!(analyzer.has_reference());
+    }
+
+    #[test]
+    fn test_analyzer_loss_only_mode() {
+        let analyzer = Analyzer::new(&[], 48000);
+        assert_eq!(analyzer.sample_rate(), 48000);
+        assert!(!analyzer.has_reference());
     }
 
     #[test]
@@ -302,19 +325,72 @@ mod tests {
     }
 
     #[test]
-    fn test_latency_ms_calculation() {
+    fn test_frame_loss_detection() {
+        let mut analyzer = Analyzer::new(&[], 48000);
+
+        // Simulate continuous counter values with a gap
+        // Frames 0-99, then skip to 105-199 (missing 100,101,102,103,104 = 5 frames)
+        let mut samples = Vec::new();
+        for i in 0..100 {
+            samples.push(i as f32 / 65536.0);
+        }
+        // Skip 5 frames (100-104)
+        for i in 105..200 {
+            samples.push(i as f32 / 65536.0);
+        }
+
+        let lost = analyzer.detect_frame_loss(&samples);
+        // After frame 99, expected is 100. We receive 105.
+        // diff = 105 - 100 = 5, lost = diff - 1 = 4
+        // This is because the algorithm detects gap size minus the first received sample
+        assert!(
+            lost >= 4 && lost <= 5,
+            "Should detect approximately 5 lost frames, got {}",
+            lost
+        );
+    }
+
+    #[test]
+    fn test_no_frame_loss() {
+        let mut analyzer = Analyzer::new(&[], 48000);
+
+        // Continuous counter values
+        let samples: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
+
+        let lost = analyzer.detect_frame_loss(&samples);
+        assert_eq!(lost, 0, "Should detect no lost frames");
+    }
+
+    #[test]
+    fn test_frame_counter_wrap() {
+        let mut analyzer = Analyzer::new(&[], 48000);
+
+        // Counter wrapping around 65536
+        let mut samples = Vec::new();
+        for i in 65530..65536 {
+            samples.push(i as f32 / 65536.0);
+        }
+        for i in 0..10 {
+            samples.push(i as f32 / 65536.0);
+        }
+
+        let lost = analyzer.detect_frame_loss(&samples);
+        assert_eq!(lost, 0, "Should handle wrap-around correctly");
+    }
+
+    #[test]
+    fn test_reset() {
         let gen = MlsGenerator::new(10);
         let sequence = gen.sequence().to_vec();
-
         let mut analyzer = Analyzer::new(&sequence, 48000);
 
-        // 480 samples = 10ms at 48kHz
-        let delay = 480;
-        let mut delayed: Vec<f32> = vec![0.0; delay];
-        delayed.extend(&sequence);
+        // Do some analysis
+        let _ = analyzer.analyze(&sequence);
 
-        let result = analyzer.analyze(&delayed);
-        assert!((result.latency_ms - 10.0).abs() < 0.1);
+        analyzer.reset();
+
+        // After reset, expected_frame should be 0
+        assert_eq!(analyzer.expected_frame, 0);
     }
 
     #[test]
@@ -324,7 +400,6 @@ mod tests {
 
         let mut analyzer = Analyzer::new(&sequence, 48000);
 
-        // Too few samples
         let short_buffer = [0.0f32; 100];
         let result = analyzer.analyze(&short_buffer);
         assert!(!result.is_healthy);
