@@ -7,8 +7,7 @@ pub mod api;
 pub mod ui;
 pub mod ws;
 
-use audiotester_core::audio::analyzer::AnalysisResult;
-use audiotester_core::audio::engine::{AudioEngine, DeviceInfo, EngineState};
+use audiotester_core::audio::engine::{AnalysisResult, AudioEngine, DeviceInfo, EngineState};
 use audiotester_core::stats::store::StatsStore;
 use axum::Router;
 use std::sync::{Arc, Mutex};

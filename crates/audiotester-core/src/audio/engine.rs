@@ -4,9 +4,19 @@
 //! - Enumerating ASIO devices
 //! - Opening input/output streams
 //! - Managing audio callbacks
+//!
+//! ## Latency Measurement
+//!
+//! Uses timestamp-based burst detection for accurate latency measurement:
+//! - Channel 0: 10ms burst every 100ms (10Hz update rate)
+//! - Channel 1: Frame counter (sawtooth 0.0-1.0) for loss detection
+//!
+//! Latency is calculated by comparing burst generation timestamps with
+//! detection timestamps, providing sub-millisecond accuracy.
 
-use crate::audio::analyzer::{AnalysisResult, Analyzer};
-use crate::audio::signal::MlsGenerator;
+use crate::audio::analyzer::Analyzer;
+use crate::audio::burst::{BurstEvent, BurstGenerator};
+use crate::audio::latency::{LatencyAnalyzer, LatencyResult};
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
@@ -14,9 +24,10 @@ use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use thiserror::Error;
 
-/// Ring buffer size in samples (enough for ~1 second at 48kHz)
+/// Ring buffer size in samples (enough for ~0.5 second at 96kHz)
 const RING_BUFFER_SIZE: usize = 65536;
 
 /// Errors that can occur during audio engine operations
@@ -70,12 +81,46 @@ pub enum EngineState {
     Error,
 }
 
+/// Analysis results from comparing sent and received signals
+///
+/// Compatible with previous MLS-based interface for backward compatibility.
+#[derive(Debug, Clone, Default)]
+pub struct AnalysisResult {
+    /// Measured latency in samples
+    pub latency_samples: usize,
+    /// Measured latency in milliseconds
+    pub latency_ms: f64,
+    /// Correlation confidence (0.0 to 1.0)
+    pub confidence: f32,
+    /// Number of lost samples detected
+    pub lost_samples: usize,
+    /// Number of corrupted samples detected
+    pub corrupted_samples: usize,
+    /// Whether the signal is healthy
+    pub is_healthy: bool,
+}
+
+impl From<LatencyResult> for AnalysisResult {
+    fn from(lr: LatencyResult) -> Self {
+        Self {
+            latency_samples: lr.latency_samples,
+            latency_ms: lr.latency_ms,
+            confidence: lr.confidence,
+            lost_samples: 0,
+            corrupted_samples: 0,
+            is_healthy: lr.confidence > 0.5,
+        }
+    }
+}
+
 /// Shared state between audio callbacks and main thread
 struct SharedState {
-    /// MLS generator for output
-    generator: Mutex<MlsGenerator>,
-    /// Signal analyzer
-    analyzer: Mutex<Analyzer>,
+    /// Burst generator for output
+    burst_gen: Mutex<BurstGenerator>,
+    /// Latency analyzer for timestamp-based measurement
+    latency_analyzer: Mutex<LatencyAnalyzer>,
+    /// Frame-based loss detector (for counter channel)
+    frame_analyzer: Mutex<Analyzer>,
     /// Latest analysis result
     last_result: Mutex<Option<AnalysisResult>>,
     /// Running flag
@@ -88,6 +133,13 @@ struct SharedState {
     output_frame_counter: std::sync::atomic::AtomicU64,
 }
 
+/// Callback timestamp for latency calculation
+#[derive(Debug, Clone)]
+struct CallbackTimestamp {
+    /// When the callback was invoked
+    time: Instant,
+}
+
 /// ASIO audio engine for managing audio streams
 pub struct AudioEngine {
     state: EngineState,
@@ -98,10 +150,14 @@ pub struct AudioEngine {
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
     shared_state: Option<Arc<SharedState>>,
-    /// Consumer for input samples (MLS channel for latency analysis)
+    /// Consumer for input samples (burst channel for latency analysis)
     input_consumer: Option<ringbuf::HeapCons<f32>>,
     /// Consumer for counter samples (frame counter channel for loss detection)
     counter_consumer: Option<ringbuf::HeapCons<f32>>,
+    /// Receiver for burst events from output callback
+    burst_event_rx: Option<std::sync::mpsc::Receiver<BurstEvent>>,
+    /// Receiver for callback timestamps from input callback
+    callback_time_rx: Option<std::sync::mpsc::Receiver<CallbackTimestamp>>,
 }
 
 impl AudioEngine {
@@ -118,6 +174,8 @@ impl AudioEngine {
             shared_state: None,
             input_consumer: None,
             counter_consumer: None,
+            burst_event_rx: None,
+            callback_time_rx: None,
         }
     }
 
@@ -242,18 +300,17 @@ impl AudioEngine {
     /// Start audio processing
     ///
     /// Opens input and output streams on the selected device and begins
-    /// generating test signals and analyzing received audio.
+    /// generating burst signals and analyzing received audio for latency.
     pub fn start(&mut self) -> Result<()> {
         let device = self
             .device
             .as_ref()
             .ok_or_else(|| anyhow!("No device selected"))?;
 
-        // Get device's default output config - this tells us what sample rate the device supports
+        // Get device's default output config
         let default_output = device.default_output_config();
         let default_input = device.default_input_config();
 
-        // Log what the device reports
         tracing::info!(
             "Device default output config: {:?}",
             default_output
@@ -344,22 +401,29 @@ impl AudioEngine {
         tracing::info!("Effective sample rate: {} Hz", effective_rate);
 
         // Create ring buffers for input samples
-        // MLS ring buffer: ch0 samples for latency analysis
-        let mls_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
-        let (mls_producer, mls_consumer) = mls_ring.split();
+        // Burst ring buffer: ch0 samples for latency analysis
+        let burst_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
+        let (burst_producer, burst_consumer) = burst_ring.split();
 
         // Counter ring buffer: ch1 samples for loss detection
         let counter_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
         let (counter_producer, counter_consumer) = counter_ring.split();
 
-        // Create shared state
-        let generator = MlsGenerator::new(crate::MLS_ORDER);
-        let reference = generator.sequence().to_vec();
-        let analyzer = Analyzer::new(&reference, effective_rate);
+        // Create channels for burst events and callback timestamps
+        let (burst_event_tx, burst_event_rx) = std::sync::mpsc::channel::<BurstEvent>();
+        let (callback_time_tx, callback_time_rx) = std::sync::mpsc::channel::<CallbackTimestamp>();
+
+        // Create shared state with burst-based components
+        let burst_gen = BurstGenerator::new(effective_rate);
+        let latency_analyzer = LatencyAnalyzer::new(effective_rate);
+
+        // Frame analyzer for loss detection (uses empty reference - we only use detect_frame_loss)
+        let frame_analyzer = Analyzer::new(&[], effective_rate);
 
         let shared_state = Arc::new(SharedState {
-            generator: Mutex::new(generator),
-            analyzer: Mutex::new(analyzer),
+            burst_gen: Mutex::new(burst_gen),
+            latency_analyzer: Mutex::new(latency_analyzer),
+            frame_analyzer: Mutex::new(frame_analyzer),
             last_result: Mutex::new(None),
             running: AtomicBool::new(true),
             output_samples: std::sync::atomic::AtomicUsize::new(0),
@@ -368,7 +432,7 @@ impl AudioEngine {
         });
 
         // Create output stream with multi-channel support
-        // Channel 0: MLS signal for latency measurement
+        // Channel 0: Burst signal for latency measurement
         // Channel 1: Frame counter (sawtooth 0.0-1.0) for loss detection
         let output_state = Arc::clone(&shared_state);
         let num_output_channels = output_channels as usize;
@@ -376,10 +440,7 @@ impl AudioEngine {
             &output_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 if output_state.running.load(Ordering::Relaxed) {
-                    if let Ok(mut gen) = output_state.generator.lock() {
-                        // Data is interleaved: [ch0, ch1, ch2, ..., ch(n-1), ch0, ch1, ...]
-                        // ch0 (user's "channel 1"): MLS signal for latency
-                        // ch1 (user's "channel 2"): Frame counter for loss detection
+                    if let Ok(mut gen) = output_state.burst_gen.lock() {
                         let mut frame_count = 0usize;
 
                         // Get starting frame counter value
@@ -388,14 +449,22 @@ impl AudioEngine {
                             .load(Ordering::Relaxed);
 
                         for (i, frame) in data.chunks_mut(num_output_channels).enumerate() {
-                            // Channel 0: MLS signal
-                            let sample = gen.next_sample();
+                            // Channel 0: Burst signal
+                            let (sample, is_burst_start) = gen.next_sample();
                             if !frame.is_empty() {
                                 frame[0] = sample;
                             }
 
+                            // Capture burst start timestamp
+                            if is_burst_start {
+                                let event = BurstEvent {
+                                    start_time: Instant::now(),
+                                    start_frame: start_counter + i as u64,
+                                };
+                                let _ = burst_event_tx.send(event);
+                            }
+
                             // Channel 1: Frame counter as normalized sawtooth (0.0 to 1.0)
-                            // Counter wraps at 65536 for 16-bit precision in float
                             if frame.len() > 1 {
                                 let counter = (start_counter + i as u64) & 0xFFFF;
                                 frame[1] = (counter as f32) / 65536.0;
@@ -413,14 +482,13 @@ impl AudioEngine {
                             .output_frame_counter
                             .fetch_add(frame_count as u64, Ordering::Relaxed);
 
-                        // Track output samples (count frames, not total samples)
+                        // Track output samples
                         let prev = output_state
                             .output_samples
                             .fetch_add(frame_count, Ordering::Relaxed);
-                        // Log first callback to confirm output is working
                         if prev == 0 {
                             tracing::info!(
-                                "Output callback started: {} frames ({} channels), ch0={:.4}, ch1={:.4}",
+                                "Output callback started: {} frames ({} channels), burst mode, ch0={:.4}, ch1={:.4}",
                                 frame_count,
                                 num_output_channels,
                                 data.first().copied().unwrap_or(0.0),
@@ -429,7 +497,6 @@ impl AudioEngine {
                         }
                     }
                 } else {
-                    // Fill with silence when stopped
                     data.fill(0.0);
                 }
             },
@@ -440,9 +507,7 @@ impl AudioEngine {
         )?;
 
         // Create input stream with dual-channel extraction
-        // ch0 → MLS producer (latency measurement)
-        // ch1 → Counter producer (loss detection)
-        let mls_input_producer = Arc::new(Mutex::new(mls_producer));
+        let burst_input_producer = Arc::new(Mutex::new(burst_producer));
         let counter_input_producer = Arc::new(Mutex::new(counter_producer));
         let input_state = Arc::clone(&shared_state);
         let num_input_channels = input_channels as usize;
@@ -451,29 +516,33 @@ impl AudioEngine {
             &input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
-                    let mls_lock = mls_input_producer.lock();
+                    // Capture callback timestamp
+                    let callback_time = Instant::now();
+                    let frame_count = data.len() / num_input_channels;
+
+                    let burst_lock = burst_input_producer.lock();
                     let counter_lock = counter_input_producer.lock();
 
-                    if let (Ok(mut mls_prod), Ok(mut cnt_prod)) = (mls_lock, counter_lock) {
-                        // Data is interleaved: [ch0, ch1, ch2, ..., ch0, ch1, ...]
-                        // ch0 (user's "channel 1"): MLS signal for latency
-                        // ch1 (user's "channel 2"): Frame counter for loss detection
+                    if let (Ok(mut burst_prod), Ok(mut cnt_prod)) = (burst_lock, counter_lock) {
                         for frame in data.chunks(num_input_channels) {
-                            // Extract ch0 (MLS)
+                            // Extract ch0 (burst signal)
                             if !frame.is_empty() {
-                                let _ = mls_prod.try_push(frame[0]);
+                                let _ = burst_prod.try_push(frame[0]);
                             }
                             // Extract ch1 (counter) if available
                             if frame.len() > 1 {
                                 let _ = cnt_prod.try_push(frame[1]);
                             }
                         }
-                        // Track input samples (count frames, not total samples)
-                        let frame_count = data.len() / num_input_channels;
+
+                        // Send callback timestamp
+                        let _ = callback_time_tx.send(CallbackTimestamp {
+                            time: callback_time,
+                        });
+
                         let prev = input_state
                             .input_samples
                             .fetch_add(frame_count, Ordering::Relaxed);
-                        // Log first callback to confirm input is working
                         if prev == 0 {
                             let max_level_ch0 = data
                                 .chunks(num_input_channels)
@@ -510,13 +579,15 @@ impl AudioEngine {
         self.output_stream = Some(output_stream);
         self.input_stream = Some(input_stream);
         self.shared_state = Some(shared_state);
-        self.input_consumer = Some(mls_consumer);
+        self.input_consumer = Some(burst_consumer);
         self.counter_consumer = Some(counter_consumer);
+        self.burst_event_rx = Some(burst_event_rx);
+        self.callback_time_rx = Some(callback_time_rx);
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
 
         tracing::info!(
-            "Audio engine started: {} @ {}Hz",
+            "Audio engine started (burst mode): {} @ {}Hz, 10Hz latency updates",
             self.device_name.as_deref().unwrap_or("unknown"),
             effective_rate
         );
@@ -526,17 +597,17 @@ impl AudioEngine {
 
     /// Stop audio processing
     pub fn stop(&mut self) -> Result<()> {
-        // Signal streams to stop
         if let Some(ref state) = self.shared_state {
             state.running.store(false, Ordering::Relaxed);
         }
 
-        // Drop streams (stops them)
         self.input_stream = None;
         self.output_stream = None;
         self.shared_state = None;
         self.input_consumer = None;
         self.counter_consumer = None;
+        self.burst_event_rx = None;
+        self.callback_time_rx = None;
 
         self.state = EngineState::Stopped;
 
@@ -548,55 +619,88 @@ impl AudioEngine {
     /// Analyze buffered input samples
     ///
     /// Call this periodically from the main thread to process received audio.
-    /// Uses dual-channel analysis:
-    /// - Channel 0 (MLS): Cross-correlation for latency measurement
-    /// - Channel 1 (counter): Frame sequence tracking for loss detection
+    /// Uses burst detection with timestamps for latency measurement and
+    /// frame counter tracking for loss detection.
     ///
     /// # Returns
-    /// Analysis result if enough samples are available
+    /// Analysis result if a burst was detected and matched
     pub fn analyze(&mut self) -> Option<AnalysisResult> {
-        let mls_consumer = self.input_consumer.as_mut()?;
+        let burst_consumer = self.input_consumer.as_mut()?;
         let counter_consumer = self.counter_consumer.as_mut()?;
         let shared_state = self.shared_state.as_ref()?;
+        let burst_event_rx = self.burst_event_rx.as_ref()?;
+        let callback_time_rx = self.callback_time_rx.as_ref()?;
 
-        // Need at least one MLS period for analysis
-        let required_samples = crate::MLS_LENGTH + 1000; // Extra for latency
+        // Register any pending burst events
+        if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
+            while let Ok(event) = burst_event_rx.try_recv() {
+                latency_analyzer.register_burst(event);
+            }
+        }
 
-        if mls_consumer.occupied_len() < required_samples {
+        // Get callback timestamps
+        let mut callback_time = None;
+        while let Ok(ts) = callback_time_rx.try_recv() {
+            callback_time = Some(ts);
+        }
+
+        // Need at least some samples for analysis
+        let available = burst_consumer.occupied_len();
+        if available < 480 {
+            // ~10ms at 48kHz minimum
             return None;
         }
 
-        // Read MLS samples from ring buffer
-        let mut mls_samples = vec![0.0f32; required_samples];
-        let mls_read = mls_consumer.pop_slice(&mut mls_samples);
-        mls_samples.truncate(mls_read);
+        // Read burst samples from ring buffer
+        let read_count = available.min(RING_BUFFER_SIZE / 2);
+        let mut burst_samples = vec![0.0f32; read_count];
+        let burst_read = burst_consumer.pop_slice(&mut burst_samples);
+        burst_samples.truncate(burst_read);
 
-        // Read counter samples (same amount if available)
-        let counter_available = counter_consumer.occupied_len().min(mls_read);
+        // Read counter samples
+        let counter_available = counter_consumer.occupied_len().min(burst_read);
         let mut counter_samples = vec![0.0f32; counter_available];
         let counter_read = counter_consumer.pop_slice(&mut counter_samples);
         counter_samples.truncate(counter_read);
 
-        // Run analysis
-        if let Ok(mut analyzer) = shared_state.analyzer.lock() {
-            let mut result = analyzer.analyze(&mls_samples);
+        // Run latency analysis
+        let mut result = AnalysisResult::default();
 
-            // If we have counter samples, use frame-based loss detection
-            // This replaces the latency-delta heuristic with accurate frame tracking
-            if !counter_samples.is_empty() {
-                let frame_loss = analyzer.detect_frame_loss(&counter_samples);
-                result.lost_samples = frame_loss;
+        if let (Ok(mut latency_analyzer), Some(ts)) =
+            (shared_state.latency_analyzer.lock(), callback_time)
+        {
+            if let Some(latency_result) = latency_analyzer.analyze(&burst_samples, ts.time) {
+                result = latency_result.into();
+                result.is_healthy = result.confidence > 0.5;
+            } else {
+                // No burst detected in this batch, but still running
+                // Return last known result or indicate no measurement
+                if let Some(last) = latency_analyzer.last_result() {
+                    result.latency_samples = last.latency_samples;
+                    result.latency_ms = last.latency_ms;
+                    result.confidence = last.confidence * 0.95; // Decay confidence
+                    result.is_healthy = result.confidence > 0.3;
+                }
             }
-
-            // Store result
-            if let Ok(mut last) = shared_state.last_result.lock() {
-                *last = Some(result.clone());
-            }
-
-            return Some(result);
         }
 
-        None
+        // Frame-based loss detection from counter channel
+        if !counter_samples.is_empty() {
+            if let Ok(mut frame_analyzer) = shared_state.frame_analyzer.lock() {
+                let frame_loss = frame_analyzer.detect_frame_loss(&counter_samples);
+                result.lost_samples = frame_loss;
+                if frame_loss > 0 {
+                    result.is_healthy = false;
+                }
+            }
+        }
+
+        // Store result
+        if let Ok(mut last) = shared_state.last_result.lock() {
+            *last = Some(result.clone());
+        }
+
+        Some(result)
     }
 
     /// Get the last analysis result
@@ -618,6 +722,35 @@ impl AudioEngine {
                 )
             })
             .unwrap_or((0, 0))
+    }
+
+    /// Get latency measurement update rate in Hz
+    pub fn update_rate(&self) -> f32 {
+        // Burst-based system runs at 10Hz (100ms cycles)
+        10.0
+    }
+
+    /// Get average latency from analyzer
+    pub fn average_latency_ms(&self) -> Option<f64> {
+        self.shared_state.as_ref().and_then(|s| {
+            s.latency_analyzer
+                .lock()
+                .ok()
+                .map(|a| a.average_latency_ms())
+        })
+    }
+
+    /// Get measurement count from analyzer
+    pub fn measurement_count(&self) -> u64 {
+        self.shared_state
+            .as_ref()
+            .and_then(|s| {
+                s.latency_analyzer
+                    .lock()
+                    .ok()
+                    .map(|a| a.measurement_count())
+            })
+            .unwrap_or(0)
     }
 }
 
@@ -651,10 +784,15 @@ mod tests {
     }
 
     #[test]
+    fn test_update_rate() {
+        let engine = AudioEngine::new();
+        assert!((engine.update_rate() - 10.0).abs() < 0.01);
+    }
+
+    #[test]
     fn test_list_devices() {
         // This may fail on CI without audio devices, but shouldn't panic
         let result = AudioEngine::list_devices();
-        // Just check it doesn't panic - may return empty list or error
         match result {
             Ok(devices) => {
                 println!("Found {} devices", devices.len());
@@ -669,5 +807,21 @@ mod tests {
                 println!("No audio devices available: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_analysis_result_from_latency() {
+        let lr = LatencyResult {
+            latency_ms: 5.0,
+            latency_samples: 480,
+            confidence: 0.8,
+            timestamp: Instant::now(),
+        };
+
+        let ar: AnalysisResult = lr.into();
+        assert_eq!(ar.latency_ms, 5.0);
+        assert_eq!(ar.latency_samples, 480);
+        assert_eq!(ar.confidence, 0.8);
+        assert!(ar.is_healthy);
     }
 }
