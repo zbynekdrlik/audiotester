@@ -41,7 +41,8 @@ pub fn run() {
     });
 
     // Spawn auto-configure thread if env vars are set
-    if std::env::var("AUDIOTESTER_DEVICE").is_ok() || std::env::var("AUDIOTESTER_AUTO_START").is_ok()
+    if std::env::var("AUDIOTESTER_DEVICE").is_ok()
+        || std::env::var("AUDIOTESTER_AUTO_START").is_ok()
     {
         let auto_engine = engine.clone();
         std::thread::spawn(move || {
