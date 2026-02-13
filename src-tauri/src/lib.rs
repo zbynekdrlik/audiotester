@@ -7,9 +7,9 @@ pub mod tray;
 
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
-use tauri::Manager;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tauri::Manager;
 
 /// Run the Tauri application
 pub fn run() {

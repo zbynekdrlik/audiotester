@@ -6,7 +6,7 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 
 ## Temporary Approvals
 
-- **TEMPORARY: Agent is approved to merge PRs from `dev` to `main`** - User has granted this approval until explicitly revoked. Agent should merge PRs, monitor the auto-release pipeline, and verify deployment on iem.lan. The goal is to deliver working versions, not just PRs.
+- **Agent is NOT approved to merge PRs** - User will manually verify dev deployments on iem.lan before approving PR merges to `main`. The dev-push CI pipeline deploys to iem.lan for testing, and the user will confirm the deployment is working before authorizing any merge.
 
 ## Agent Behavior
 
