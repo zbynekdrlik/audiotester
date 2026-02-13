@@ -1,0 +1,13 @@
+{
+  "name": "audiotester",
+  "version": "0.1.5",
+  "private": true,
+  "description": "Playwright E2E tests for audiotester web UI",
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.58.2"
+  }
+}
