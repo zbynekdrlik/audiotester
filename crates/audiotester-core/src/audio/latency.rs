@@ -296,8 +296,8 @@ mod tests {
         // Create input buffer with burst signal
         let mut samples = vec![0.0f32; 500];
         // Add burst starting at index 100
-        for i in 100..500 {
-            samples[i] = 0.5;
+        for sample in samples.iter_mut().skip(100) {
+            *sample = 0.5;
         }
 
         let callback_time = Instant::now();
@@ -343,8 +343,8 @@ mod tests {
 
         // Analyze buffer with burst
         let mut samples = vec![0.0f32; 500];
-        for i in 100..500 {
-            samples[i] = 0.5;
+        for sample in samples.iter_mut().skip(100) {
+            *sample = 0.5;
         }
 
         let result = analyzer.analyze(&samples, Instant::now());
@@ -397,8 +397,8 @@ mod tests {
 
             // Then provide burst
             let mut samples = vec![0.0f32; 500];
-            for j in 100..500 {
-                samples[j] = 0.5;
+            for sample in samples.iter_mut().skip(100) {
+                *sample = 0.5;
             }
 
             let _ = analyzer.analyze(&samples, Instant::now());

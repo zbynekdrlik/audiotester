@@ -352,10 +352,8 @@ mod tests {
 
         let mut detected_in_debounce = false;
         for i in 0..100 {
-            if detector.process(0.5, 200 + i).is_some() {
-                if i + 200 < min_gap {
-                    detected_in_debounce = true;
-                }
+            if detector.process(0.5, 200 + i).is_some() && i + 200 < min_gap {
+                detected_in_debounce = true;
             }
         }
 
@@ -393,8 +391,8 @@ mod tests {
 
         // Create buffer with silence then burst
         let mut buffer = vec![0.0f32; 2000];
-        for i in 1000..2000 {
-            buffer[i] = 0.5;
+        for sample in buffer.iter_mut().skip(1000) {
+            *sample = 0.5;
         }
 
         let results = detector.process_buffer(&buffer);
