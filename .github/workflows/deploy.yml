@@ -36,10 +36,28 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
+          echo "Killing all audiotester instances..."
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
             "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
+          sleep 3
+          # Second kill to catch zombies
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'Clean'"
           sleep 2
+          # Verify no instances remain
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'CLEAN'")
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            echo "::warning::Process still running, attempting wmic terminate"
+            sshpass -e ssh -o StrictHostKeyChecking=no \
+              "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+              "wmic process where name='audiotester.exe' call terminate 2>nul || echo 'wmic done'"
+            sleep 2
+          fi
+          echo "Process cleanup complete"
 
       - name: Deploy files
         env:
@@ -61,13 +79,16 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          sshpass -e ssh -o StrictHostKeyChecking=no \
-            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "powershell -Command \"Set-Content -Path '${{ env.DEPLOY_PATH }}\start.bat' -Value '${{ env.DEPLOY_PATH }}\audiotester.exe'\""
+          # Create start.bat locally then scp to remote
+          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VASIO 8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nC:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
+
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            /tmp/start.bat \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/start.bat"
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"${{ env.DEPLOY_PATH }}\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"${{ env.DEPLOY_PATH }}\start.bat\" /SC ONLOGON /RU iem /F /IT"
 
       - name: Start application
         env:
@@ -91,6 +112,32 @@ jobs:
             echo "audiotester.exe is running"
           else
             echo "::error::audiotester.exe is NOT running after deploy!"
+            exit 1
+          fi
+
+      - name: Smoke test - Web server responds
+        run: |
+          echo "Waiting for web server to respond..."
+          for i in $(seq 1 20); do
+            if curl -sf "http://${{ env.DEPLOY_HOST }}:8920/api/v1/status" > /dev/null 2>&1; then
+              echo "Web server ready after ${i}s"
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "::error::Web server did not respond within 20s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Smoke test - API health check
+        run: |
+          STATUS=$(curl -sf "http://${{ env.DEPLOY_HOST }}:8920/api/v1/status")
+          echo "Status: $STATUS"
+          VERSION=$(echo "$STATUS" | jq -r '.version')
+          echo "API version: $VERSION"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Invalid version in status response"
             exit 1
           fi
 

@@ -144,11 +144,28 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
+          echo "Killing all audiotester instances..."
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
             "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
-          # Wait for process to fully exit
+          sleep 3
+          # Second kill to catch zombies
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'Clean'"
           sleep 2
+          # Verify no instances remain
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'CLEAN'")
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            echo "::warning::Process still running, attempting wmic terminate"
+            sshpass -e ssh -o StrictHostKeyChecking=no \
+              "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+              "wmic process where name='audiotester.exe' call terminate 2>nul || echo 'wmic done'"
+            sleep 2
+          fi
+          echo "Process cleanup complete"
 
       - name: Deploy files
         env:
@@ -170,15 +187,17 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          # Create start.bat with correct device and sample rate
-          sshpass -e ssh -o StrictHostKeyChecking=no \
-            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "powershell -Command \"Set-Content -Path 'C:\Users\iem\audiotester\start.bat' -Value 'C:\Users\iem\audiotester\audiotester.exe'\""
+          # Create start.bat locally then scp to remote
+          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VASIO 8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nC:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
+
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            /tmp/start.bat \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}:C:/Users/iem/audiotester/start.bat"
 
           # Create/update scheduled task to run in interactive desktop session
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU iem /F /IT"
 
       - name: Start application
         env:
@@ -213,6 +232,66 @@ jobs:
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
             "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH" | cut -d',' -f3)
           echo "Session: $SESSION"
+
+      - name: Smoke test - Web server responds
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          echo "Waiting for web server to respond..."
+          for i in $(seq 1 20); do
+            if curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/status" > /dev/null 2>&1; then
+              echo "Web server ready after ${i}s"
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "::error::Web server did not respond within 20s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Smoke test - API health check
+        run: |
+          STATUS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/status")
+          echo "Status: $STATUS"
+
+          # Verify version field exists
+          VERSION=$(echo "$STATUS" | jq -r '.version')
+          echo "API version: $VERSION"
+          if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+            echo "::error::Invalid version in status response"
+            exit 1
+          fi
+
+          # Check device is selected (auto-configure should have run)
+          DEVICE=$(echo "$STATUS" | jq -r '.device // empty')
+          if [ -n "$DEVICE" ]; then
+            echo "Device selected: $DEVICE"
+          else
+            echo "::warning::No device selected yet (auto-configure may still be running)"
+          fi
+
+      - name: Smoke test - Latency measurement
+        run: |
+          echo "Waiting for analysis cycles..."
+          sleep 15
+          STATS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/stats")
+          echo "Stats: $STATS"
+
+          LATENCY=$(echo "$STATS" | jq '.current_latency')
+          MEASUREMENTS=$(echo "$STATS" | jq '.measurement_count')
+          echo "Current latency: ${LATENCY}ms, Measurements: $MEASUREMENTS"
+
+          if [ "$MEASUREMENTS" -gt 0 ] 2>/dev/null; then
+            echo "Audio monitoring is producing measurements"
+            if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 50) ? 0 : 1}'; then
+              echo "Latency is in expected range (0-50ms)"
+            else
+              echo "::warning::Latency $LATENCY ms is outside expected range"
+            fi
+          else
+            echo "::warning::No measurements yet - device may not be ready"
+          fi
 
       - name: Summary
         run: |

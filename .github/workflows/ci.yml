@@ -199,10 +199,186 @@ jobs:
           name: playwright-report
           path: test-results/
 
+  # Build release binary for dev-push deployment
+  build-dev:
+    name: Build Dev Release
+    needs: [fmt, clippy, build, test, e2e, playwright]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo registry
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build -p audiotester-app --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audiotester-dev-build
+          path: target/x86_64-pc-windows-msvc/release/audiotester-app.exe
+
+  # Deploy dev build to iem.lan for hardware testing
+  deploy-dev:
+    name: Deploy Dev to iem.lan
+    needs: [build-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    runs-on: [self-hosted, deployer]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: audiotester-dev-build
+
+      - name: Stop running instance
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          echo "Killing all audiotester instances..."
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
+          sleep 3
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'Clean'"
+          sleep 2
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'CLEAN'")
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            sshpass -e ssh -o StrictHostKeyChecking=no \
+              "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+              "wmic process where name='audiotester.exe' call terminate 2>nul || echo 'wmic done'"
+            sleep 2
+          fi
+
+      - name: Deploy files
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "if not exist \"C:\Users\iem\audiotester\" mkdir \"C:\Users\iem\audiotester\""
+
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            audiotester-app.exe \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}:C:/Users/iem/audiotester/audiotester.exe"
+
+      - name: Create start script and scheduled task
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          # Create start.bat locally then scp to remote
+          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VASIO 8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nC:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
+
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            /tmp/start.bat \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}:C:/Users/iem/audiotester/start.bat"
+
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU iem /F /IT"
+
+      - name: Start application
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "schtasks /Run /TN audiotester"
+          sleep 5
+
+      - name: Verify deployment
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'NOT_FOUND'")
+          echo "Process check: $RESULT"
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            echo "audiotester.exe is running"
+          else
+            echo "::error::audiotester.exe is NOT running after deploy!"
+            exit 1
+          fi
+
+      - name: Smoke test - Web server responds
+        run: |
+          echo "Waiting for web server..."
+          for i in $(seq 1 20); do
+            if curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/status" > /dev/null 2>&1; then
+              echo "Web server ready after ${i}s"
+              break
+            fi
+            if [ "$i" = "20" ]; then
+              echo "::error::Web server did not respond within 20s"
+              exit 1
+            fi
+            sleep 1
+          done
+
+      - name: Smoke test - API health check
+        run: |
+          STATUS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/status")
+          echo "Status: $STATUS"
+          VERSION=$(echo "$STATUS" | jq -r '.version')
+          echo "API version: $VERSION"
+
+      - name: Smoke test - Latency measurement
+        run: |
+          echo "Waiting for analysis cycles..."
+          sleep 15
+          STATS=$(curl -sf "http://${{ secrets.IEM_HOST }}:8920/api/v1/stats")
+          echo "Stats: $STATS"
+          LATENCY=$(echo "$STATS" | jq '.current_latency')
+          MEASUREMENTS=$(echo "$STATS" | jq '.measurement_count')
+          echo "Current latency: ${LATENCY}ms, Measurements: $MEASUREMENTS"
+
+      - name: Run hardware Playwright tests
+        continue-on-error: true
+        run: |
+          # Install Node.js if not available
+          if ! command -v node &> /dev/null; then
+            curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - || true
+            sudo apt-get install -y nodejs || true
+          fi
+          if command -v node &> /dev/null; then
+            npm ci || true
+            npx playwright install chromium || true
+            AUDIOTESTER_HARDWARE_TEST=true \
+            AUDIOTESTER_HOST="${{ secrets.IEM_HOST }}" \
+            npx playwright test --reporter=list || true
+          else
+            echo "::warning::Node.js not available on deployer, skipping Playwright tests"
+          fi
+
   # Summary job that depends on all checks including branch-check
   ci-success:
     name: CI Success
-    needs: [branch-check, main-sync, fmt, clippy, build, test, e2e, playwright]
+    needs:
+      [
+        branch-check,
+        main-sync,
+        fmt,
+        clippy,
+        build,
+        test,
+        e2e,
+        playwright,
+        build-dev,
+        deploy-dev,
+      ]
     runs-on: windows-latest
     if: always()
     steps:
@@ -216,8 +392,14 @@ jobs:
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.e2e.result }}" != "success" ]] || \
-             [[ "${{ needs.playwright.result }}" != "success" ]]; then
+             [[ "${{ needs.playwright.result }}" != "success" ]] || \
+             [[ "${{ needs.build-dev.result }}" != "success" && "${{ needs.build-dev.result }}" != "skipped" ]]; then
             echo "One or more jobs failed"
             exit 1
           fi
           echo "All CI checks passed!"
+
+          # Report deploy-dev status (informational, non-blocking)
+          if [[ "${{ needs.deploy-dev.result }}" == "failure" ]]; then
+            echo "::warning::deploy-dev failed (non-blocking) - check deployment logs"
+          fi

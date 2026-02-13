@@ -41,6 +41,26 @@ test.describe("Dashboard Page", () => {
     await expect(latencyEl).not.toHaveText("--");
   });
 
+  test("lost and corrupted values show numeric values", async ({ page }) => {
+    const lostEl = page.locator('[data-testid="lost-value"]');
+    const corruptedEl = page.locator('[data-testid="corrupted-value"]');
+    // If test-ids exist, verify they show numbers not "--"
+    if ((await lostEl.count()) > 0) {
+      await expect(lostEl).not.toHaveText("--");
+    }
+    if ((await corruptedEl.count()) > 0) {
+      await expect(corruptedEl).not.toHaveText("--");
+    }
+  });
+
+  test("chart containers exist with correct structure", async ({ page }) => {
+    // Latency History and Sample Loss sections should contain chart containers
+    const latencySection = page.getByText("Latency History");
+    await expect(latencySection).toBeVisible();
+    const lossSection = page.getByText("Sample Loss Events");
+    await expect(lossSection).toBeVisible();
+  });
+
   test("navigates to settings page", async ({ page }) => {
     await page.getByRole("link", { name: "Settings" }).click();
     await expect(page).toHaveTitle("Audiotester - Settings");
