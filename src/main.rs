@@ -352,8 +352,8 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
             unsafe {
                 let mut msg = MSG::default();
                 while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).into() {
-                    TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
+                    let _ = TranslateMessage(&msg);
+                    let _ = DispatchMessageW(&msg);
                 }
             }
         }
