@@ -29,9 +29,9 @@ fn test_burst_generator_structure() {
     }
 
     // Burst start should be flagged
-    let (sample, is_start) = gen.next_sample();
+    let (_sample, is_start) = gen.next_sample();
     assert!(is_start, "First burst sample should be marked as start");
-    assert!(sample != 0.0 || true, "First sample may be zero by chance");
+    // Note: First burst sample value is random noise, may be any value including zero
 }
 
 /// Test burst detector finds burst onset
