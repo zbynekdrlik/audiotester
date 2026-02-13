@@ -65,8 +65,8 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Build release binary
-        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+      - name: Build release binary (Tauri app)
+        run: cargo build -p audiotester-app --release --locked --target x86_64-pc-windows-msvc
 
       - name: Create release archive
         shell: pwsh
@@ -76,7 +76,7 @@ jobs:
           $archiveName = "audiotester-$version-windows-x64.zip"
 
           New-Item -ItemType Directory -Force -Path "release"
-          Copy-Item "target/x86_64-pc-windows-msvc/release/audiotester.exe" "release/"
+          Copy-Item "target/x86_64-pc-windows-msvc/release/audiotester-app.exe" "release/audiotester.exe"
           Copy-Item "README.md" "release/" -ErrorAction SilentlyContinue
           Copy-Item "LICENSE" "release/" -ErrorAction SilentlyContinue
           Compress-Archive -Path "release/*" -DestinationPath $archiveName
@@ -173,7 +173,7 @@ jobs:
           # Create start.bat with correct device and sample rate
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "powershell -Command \"Set-Content -Path 'C:\Users\iem\audiotester\start.bat' -Value 'C:\Users\iem\audiotester\audiotester.exe -d \\\"VB-Matrix VASIO-8\\\" -r 96000'\""
+            "powershell -Command \"Set-Content -Path 'C:\Users\iem\audiotester\start.bat' -Value 'C:\Users\iem\audiotester\audiotester.exe'\""
 
           # Create/update scheduled task to run in interactive desktop session
           sshpass -e ssh -o StrictHostKeyChecking=no \
@@ -222,3 +222,4 @@ jobs:
           echo "- **Target**: iem.lan" >> $GITHUB_STEP_SUMMARY
           echo "- **Status**: Deployed and running" >> $GITHUB_STEP_SUMMARY
           echo "- **App**: Started in interactive desktop session" >> $GITHUB_STEP_SUMMARY
+          echo "- **Web UI**: http://iem.lan:8920" >> $GITHUB_STEP_SUMMARY

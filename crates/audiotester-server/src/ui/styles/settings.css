@@ -1,0 +1,177 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family:
+    -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #1a1a2e;
+  color: #e0e0e0;
+  min-height: 100vh;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.75rem 1.5rem;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+}
+
+.header h1 {
+  font-size: 1.2rem;
+  color: #00d4ff;
+  margin-right: 1rem;
+}
+
+nav {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.nav-link {
+  color: #8892b0;
+  text-decoration: none;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  font-size: 0.9rem;
+}
+
+.nav-link:hover {
+  color: #e0e0e0;
+  background: rgba(255, 255, 255, 0.05);
+}
+.nav-link.active {
+  color: #00d4ff;
+  background: rgba(0, 212, 255, 0.1);
+}
+
+main {
+  padding: 1rem 1.5rem;
+}
+
+.settings-section {
+  background: #16213e;
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-bottom: 1rem;
+}
+
+.settings-section h2 {
+  font-size: 1rem;
+  color: #00d4ff;
+  margin-bottom: 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 1px solid #0f3460;
+}
+
+.form-group {
+  margin-bottom: 1rem;
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.85rem;
+  color: #8892b0;
+  margin-bottom: 0.4rem;
+}
+
+.form-group select {
+  width: 100%;
+  max-width: 400px;
+  padding: 0.6rem;
+  background: #0f1729;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 0.9rem;
+}
+
+.form-group select:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
+.monitoring-controls {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.status-display {
+  font-size: 1rem;
+  font-weight: 600;
+  padding: 0.4rem 0.8rem;
+  border-radius: 4px;
+  min-width: 100px;
+  text-align: center;
+}
+
+.status-display.running {
+  background: rgba(0, 200, 0, 0.2);
+  color: #00c800;
+}
+
+.status-display.stopped {
+  background: rgba(128, 128, 128, 0.2);
+  color: #808080;
+}
+
+.btn {
+  padding: 0.5rem 1.2rem;
+  border: none;
+  border-radius: 4px;
+  font-size: 0.9rem;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: #00d4ff;
+  color: #1a1a2e;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: #00b8e6;
+}
+
+.btn-danger {
+  background: #ff4040;
+  color: white;
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: #e03030;
+}
+
+.device-info {
+  font-size: 0.9rem;
+  color: #8892b0;
+}
+
+.device-info table {
+  border-collapse: collapse;
+  width: 100%;
+  max-width: 400px;
+}
+
+.device-info td {
+  padding: 0.3rem 0;
+}
+
+.device-info td:first-child {
+  color: #8892b0;
+  width: 120px;
+}
+
+.device-info td:last-child {
+  color: #e0e0e0;
+}

@@ -95,7 +95,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   build:
     name: Build
@@ -111,11 +111,11 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Build debug
-        run: cargo build --verbose
+      - name: Build workspace (debug)
+        run: cargo build --workspace --verbose
 
-      - name: Build release
-        run: cargo build --release --verbose
+      - name: Build workspace (release)
+        run: cargo build --workspace --release --verbose
 
   test:
     name: Test
@@ -129,8 +129,8 @@ jobs:
       - name: Cache cargo registry
         uses: Swatinem/rust-cache@v2
 
-      - name: Run unit tests
-        run: cargo test --lib --verbose
+      - name: Run unit tests (all workspace crates)
+        run: cargo test --workspace --lib --verbose
 
       - name: Run integration tests
         run: cargo test --test '*' --verbose

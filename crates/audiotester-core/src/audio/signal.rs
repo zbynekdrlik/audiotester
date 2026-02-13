@@ -35,7 +35,7 @@ impl MlsGenerator {
     ///
     /// # Example
     /// ```
-    /// use audiotester::audio::signal::MlsGenerator;
+    /// use audiotester_core::audio::signal::MlsGenerator;
     ///
     /// let mut gen = MlsGenerator::new(10); // 1023 sample sequence
     /// let sample = gen.next_sample();

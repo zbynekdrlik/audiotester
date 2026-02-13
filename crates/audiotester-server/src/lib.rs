@@ -1,0 +1,243 @@
+//! Audiotester Web Server - Axum + Leptos SSR
+//!
+//! Provides a web interface for monitoring audio statistics,
+//! accessible from both local desktop and remote browsers.
+
+pub mod api;
+pub mod ui;
+pub mod ws;
+
+use audiotester_core::audio::analyzer::AnalysisResult;
+use audiotester_core::audio::engine::{AudioEngine, DeviceInfo, EngineState};
+use audiotester_core::stats::store::StatsStore;
+use axum::Router;
+use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
+use tokio::sync::{mpsc, oneshot};
+use tower_http::services::ServeDir;
+
+/// Commands sent to the engine thread
+pub enum EngineCommand {
+    ListDevices {
+        reply: oneshot::Sender<anyhow::Result<Vec<DeviceInfo>>>,
+    },
+    SelectDevice {
+        name: String,
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    SetSampleRate {
+        rate: u32,
+    },
+    Start {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    Stop {
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    GetStatus {
+        reply: oneshot::Sender<EngineStatus>,
+    },
+    Analyze {
+        reply: oneshot::Sender<Option<AnalysisResult>>,
+    },
+}
+
+/// Engine status snapshot (safe to send between threads)
+#[derive(Clone, Debug)]
+pub struct EngineStatus {
+    pub state: EngineState,
+    pub device_name: Option<String>,
+    pub sample_rate: u32,
+}
+
+/// Handle to communicate with the engine thread
+#[derive(Clone)]
+pub struct EngineHandle {
+    tx: mpsc::Sender<EngineCommand>,
+}
+
+impl EngineHandle {
+    /// Spawn the engine on a dedicated thread and return a handle
+    pub fn spawn() -> Self {
+        let (tx, mut rx) = mpsc::channel::<EngineCommand>(32);
+
+        std::thread::spawn(move || {
+            let mut engine = AudioEngine::new();
+
+            while let Some(cmd) = rx.blocking_recv() {
+                match cmd {
+                    EngineCommand::ListDevices { reply } => {
+                        let _ = reply.send(AudioEngine::list_devices());
+                    }
+                    EngineCommand::SelectDevice { name, reply } => {
+                        let _ = reply.send(engine.select_device(&name));
+                    }
+                    EngineCommand::SetSampleRate { rate } => {
+                        engine.set_sample_rate(rate);
+                    }
+                    EngineCommand::Start { reply } => {
+                        let _ = reply.send(engine.start());
+                    }
+                    EngineCommand::Stop { reply } => {
+                        let _ = reply.send(engine.stop());
+                    }
+                    EngineCommand::GetStatus { reply } => {
+                        let _ = reply.send(EngineStatus {
+                            state: engine.state(),
+                            device_name: engine.device_name().map(|s| s.to_string()),
+                            sample_rate: engine.sample_rate(),
+                        });
+                    }
+                    EngineCommand::Analyze { reply } => {
+                        let _ = reply.send(engine.analyze());
+                    }
+                }
+            }
+        });
+
+        Self { tx }
+    }
+
+    pub async fn list_devices(&self) -> anyhow::Result<Vec<DeviceInfo>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::ListDevices { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?
+    }
+
+    pub async fn select_device(&self, name: String) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SelectDevice { name, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?
+    }
+
+    pub async fn set_sample_rate(&self, rate: u32) {
+        let _ = self.tx.send(EngineCommand::SetSampleRate { rate }).await;
+    }
+
+    pub async fn start(&self) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::Start { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?
+    }
+
+    pub async fn stop(&self) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::Stop { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?
+    }
+
+    pub async fn get_status(&self) -> anyhow::Result<EngineStatus> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetStatus { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
+    pub async fn analyze(&self) -> anyhow::Result<Option<AnalysisResult>> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::Analyze { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+}
+
+/// Shared application state accessible from all handlers
+#[derive(Clone)]
+pub struct AppState {
+    /// Handle to engine thread
+    pub engine: EngineHandle,
+    /// Statistics store for recording measurements
+    pub stats: Arc<Mutex<StatsStore>>,
+    /// WebSocket broadcast channel
+    pub ws_tx: tokio::sync::broadcast::Sender<String>,
+    /// Server configuration
+    pub config: ServerConfig,
+}
+
+/// Server configuration
+#[derive(Clone, Debug)]
+pub struct ServerConfig {
+    /// Port to listen on
+    pub port: u16,
+    /// Bind address
+    pub bind_addr: String,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            port: 8920,
+            bind_addr: "0.0.0.0".to_string(),
+        }
+    }
+}
+
+impl AppState {
+    /// Create a new AppState with the given engine handle and stats store
+    pub fn new(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, config: ServerConfig) -> Self {
+        let (ws_tx, _) = tokio::sync::broadcast::channel(64);
+        Self {
+            engine,
+            stats,
+            ws_tx,
+            config,
+        }
+    }
+}
+
+/// Build the Axum router with all routes
+pub fn build_router(state: AppState) -> Router {
+    Router::new()
+        // Leptos SSR pages
+        .route("/", axum::routing::get(ui::dashboard::dashboard_page))
+        .route("/settings", axum::routing::get(ui::settings::settings_page))
+        // REST API
+        .route("/api/v1/status", axum::routing::get(api::get_status))
+        .route("/api/v1/stats", axum::routing::get(api::get_stats))
+        .route("/api/v1/devices", axum::routing::get(api::list_devices))
+        .route(
+            "/api/v1/config",
+            axum::routing::get(api::get_config).patch(api::update_config),
+        )
+        .route(
+            "/api/v1/monitoring",
+            axum::routing::post(api::toggle_monitoring),
+        )
+        // WebSocket
+        .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
+        // Static assets (CSS, JS)
+        .nest_service("/assets", ServeDir::new("assets"))
+        .with_state(state)
+}
+
+/// Start the web server
+pub async fn start_server(state: AppState) -> anyhow::Result<()> {
+    let addr = format!("{}:{}", state.config.bind_addr, state.config.port);
+    let app = build_router(state);
+
+    let listener = TcpListener::bind(&addr).await?;
+    tracing::info!(%addr, "Audiotester web server listening");
+
+    axum::serve(listener, app).await?;
+    Ok(())
+}

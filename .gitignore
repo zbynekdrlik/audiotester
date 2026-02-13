@@ -36,6 +36,11 @@ test-output/
 coverage/
 
 # Release artifacts
-dist/
 *.msi
 *.zip
+
+# Node.js (Playwright only)
+node_modules/
+
+# Tauri
+src-tauri/gen/
