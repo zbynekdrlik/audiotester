@@ -278,10 +278,12 @@ jobs:
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          # Create start.bat with environment variables using cmd echo
-          sshpass -e ssh -o StrictHostKeyChecking=no \
-            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "cmd /c \"echo @echo off> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_DEVICE=VASIO 8>> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_SAMPLE_RATE=96000>> C:\Users\iem\audiotester\start.bat && echo set AUDIOTESTER_AUTO_START=true>> C:\Users\iem\audiotester\start.bat && echo set RUST_LOG=audiotester=info>> C:\Users\iem\audiotester\start.bat && echo C:\Users\iem\audiotester\audiotester.exe>> C:\Users\iem\audiotester\start.bat\""
+          # Create start.bat locally then scp to remote
+          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VASIO 8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nC:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
+
+          sshpass -e scp -o StrictHostKeyChecking=no \
+            /tmp/start.bat \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}:C:/Users/iem/audiotester/start.bat"
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
