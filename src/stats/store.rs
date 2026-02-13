@@ -162,14 +162,28 @@ impl StatsStore {
 
     /// Get latency values for plotting (last N points)
     ///
-    /// # Arguments
-    /// * `count` - Maximum number of points to return
-    ///
     /// # Returns
     /// Vector of (time_offset_seconds, latency_ms) pairs
     pub fn latency_plot_data(&self, count: usize) -> Vec<(f64, f64)> {
         let now = Utc::now();
         self.latency_history
+            .iter()
+            .rev()
+            .take(count)
+            .map(|m| {
+                let time_offset = (now - m.timestamp).num_milliseconds() as f64 / 1000.0;
+                (-time_offset, m.value)
+            })
+            .collect()
+    }
+
+    /// Get loss values for plotting (last N points)
+    ///
+    /// # Returns
+    /// Vector of (time_offset_seconds, loss_count) pairs
+    pub fn loss_plot_data(&self, count: usize) -> Vec<(f64, f64)> {
+        let now = Utc::now();
+        self.loss_history
             .iter()
             .rev()
             .take(count)

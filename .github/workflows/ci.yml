@@ -14,10 +14,11 @@ jobs:
   # CRITICAL: Enforce two-branch policy
   branch-check:
     name: Branch Policy Check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     steps:
       - name: Verify PR source branch
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        shell: bash
         run: |
           if [[ "${{ github.head_ref }}" != "dev" ]]; then
             echo "::error::BRANCH POLICY VIOLATION!"
@@ -34,6 +35,7 @@ jobs:
           echo "Branch policy check passed: PR is from 'dev' to 'main'"
 
       - name: Confirm branch policy
+        shell: bash
         run: |
           echo "Branch policy: Only 'main' and 'dev' branches are allowed"
           echo "Current event: ${{ github.event_name }}"
@@ -43,7 +45,7 @@ jobs:
   # Early check: verify dev branch includes all main commits
   main-sync:
     name: Main Sync Check
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     if: github.ref == 'refs/heads/dev'
     steps:
       - uses: actions/checkout@v4
@@ -51,6 +53,7 @@ jobs:
           fetch-depth: 0
 
       - name: Verify dev is up to date with main
+        shell: bash
         run: |
           git fetch origin main
           if ! git merge-base --is-ancestor origin/main HEAD; then
@@ -151,10 +154,11 @@ jobs:
   ci-success:
     name: CI Success
     needs: [branch-check, main-sync, fmt, clippy, build, test, e2e]
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     if: always()
     steps:
       - name: Check all jobs passed
+        shell: bash
         run: |
           if [[ "${{ needs.branch-check.result }}" != "success" ]] || \
              [[ "${{ needs.main-sync.result }}" != "success" && "${{ needs.main-sync.result }}" != "skipped" ]] || \

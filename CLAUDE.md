@@ -4,6 +4,10 @@
 
 Windows ASIO audio testing application for monitoring professional audio paths (Dante, VBAN, VBMatrix). The application runs as a system tray utility that sends test signals, receives looped audio, and compares them to detect latency issues and sample loss.
 
+## Temporary Approvals
+
+- **TEMPORARY: Agent is approved to merge PRs from `dev` to `main`** - User has granted this approval until explicitly revoked. Agent should merge PRs, monitor the auto-release pipeline, and verify deployment on iem.lan. The goal is to deliver working versions, not just PRs.
+
 ## Agent Behavior
 
 - Act as a highly skilled Rust/ASIO developer with expertise in real-time audio processing
