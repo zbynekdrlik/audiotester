@@ -4,8 +4,11 @@
 
 use anyhow::Result;
 use audiotester::audio::engine::AudioEngine;
+use audiotester::stats::store::StatsStore;
+use audiotester::ui::stats_window;
 use audiotester::ui::tray::{TrayAction, TrayManager, TrayStatus};
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info};
 
@@ -197,6 +200,9 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
 
     info!("Output callback active - sending MLS signal on channel 1");
 
+    // Create shared stats store for recording analysis results
+    let stats_store = Arc::new(Mutex::new(StatsStore::new()));
+
     // Initialize tray manager
     let mut tray_manager = TrayManager::new()?;
     let use_tray = !no_tray && cfg!(windows);
@@ -257,8 +263,12 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
                         }
                     }
                     TrayAction::ShowStats => {
-                        info!("Show stats requested (not yet implemented)");
-                        // TODO: Phase 5 - Open stats window
+                        info!("Opening statistics window");
+                        stats_window::open_stats_window(
+                            Arc::clone(&stats_store),
+                            device_name.to_string(),
+                            engine.sample_rate(),
+                        );
                     }
                     TrayAction::SelectDevice => {
                         info!("Select device requested (not yet implemented)");
@@ -299,6 +309,17 @@ fn run_with_device(device_name: &str, sample_rate: Option<u32>, no_tray: bool) -
         iteration += 1;
 
         if let Some(result) = engine.analyze() {
+            // Record results to stats store
+            if let Ok(mut store) = stats_store.lock() {
+                store.record_latency(result.latency_ms);
+                if result.lost_samples > 0 {
+                    store.record_loss(result.lost_samples as u64);
+                }
+                if result.corrupted_samples > 0 {
+                    store.record_corruption(result.corrupted_samples as u64);
+                }
+            }
+
             let (status, tray_status) = if result.is_healthy {
                 ("OK", TrayStatus::Ok)
             } else if result.lost_samples > 0 {
