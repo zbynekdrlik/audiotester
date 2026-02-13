@@ -5,7 +5,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to deploy (e.g., 0.1.0)"
+        description: "Version to deploy (e.g., 0.1.5)"
         required: true
         type: string
 
@@ -20,75 +20,84 @@ jobs:
     runs-on: [self-hosted, deployer]
 
     steps:
-      - name: Get version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            VERSION="${{ github.event.release.tag_name }}"
-            VERSION="${VERSION#v}"
-          else
-            VERSION="${{ inputs.version }}"
-          fi
-          echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
-          echo "Deploying version: $VERSION"
-
       - name: Download release artifact
         run: |
-          VERSION="${{ steps.version.outputs.VERSION }}"
+          VERSION="${{ inputs.version }}"
           ASSET_NAME="audiotester-${VERSION}-windows-x64.zip"
           DOWNLOAD_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${ASSET_NAME}"
 
           echo "Downloading from: $DOWNLOAD_URL"
           curl -L -o release.zip "$DOWNLOAD_URL"
-
-          # Extract
-          unzip release.zip -d release/
+          rm -rf release/
+          unzip -o release.zip -d release/
           ls -la release/
 
-      - name: Deploy to test machine
+      - name: Stop running instance
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          # Create deploy directory if needed
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
+          sleep 2
+
+      - name: Deploy files
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
             "if not exist \"${{ env.DEPLOY_PATH }}\" mkdir \"${{ env.DEPLOY_PATH }}\""
 
-          # Stop any running instance (ignore errors)
-          sshpass -e ssh -o StrictHostKeyChecking=no \
-            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "taskkill /F /IM audiotester.exe 2>nul || echo 'No running instance'"
-
-          # Copy new version
           sshpass -e scp -o StrictHostKeyChecking=no \
             release/audiotester.exe \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/audiotester.exe"
 
-          # Copy any additional files (README, etc.)
           sshpass -e scp -o StrictHostKeyChecking=no \
             release/README.md \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}:${{ env.DEPLOY_PATH }}/" 2>/dev/null || true
 
-          echo "Deployment complete!"
-
-      - name: Verify deployment
+      - name: Create start script and scheduled task
         env:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          echo "Verifying deployment..."
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
-            "dir \"${{ env.DEPLOY_PATH }}\" && \"${{ env.DEPLOY_PATH }}\\audiotester.exe\" --version 2>nul || echo 'Version check not implemented yet'"
+            "powershell -Command \"Set-Content -Path '${{ env.DEPLOY_PATH }}\start.bat' -Value '${{ env.DEPLOY_PATH }}\audiotester.exe -d \\\"VB-Matrix VASIO-8\\\" -r 96000'\""
 
-      - name: Deployment summary
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"${{ env.DEPLOY_PATH }}\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+
+      - name: Start application
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
-          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "schtasks /Run /TN audiotester"
+          sleep 5
+
+      - name: Verify running
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          RESULT=$(sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}" \
+            "tasklist /FI \"IMAGENAME eq audiotester.exe\" /FO CSV /NH 2>nul || echo 'NOT_FOUND'")
+
+          echo "Process check: $RESULT"
+          if echo "$RESULT" | grep -q "audiotester.exe"; then
+            echo "audiotester.exe is running"
+          else
+            echo "::error::audiotester.exe is NOT running after deploy!"
+            exit 1
+          fi
+
+      - name: Summary
+        run: |
+          echo "## Manual Deploy" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- **Version**: ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version**: ${{ inputs.version }}" >> $GITHUB_STEP_SUMMARY
           echo "- **Target**: ${{ env.DEPLOY_HOST }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Path**: ${{ env.DEPLOY_PATH }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Next Steps" >> $GITHUB_STEP_SUMMARY
-          echo "1. SSH to test machine: \`ssh ${{ env.DEPLOY_USER }}@${{ env.DEPLOY_HOST }}\`" >> $GITHUB_STEP_SUMMARY
-          echo "2. Run: \`${{ env.DEPLOY_PATH }}\\audiotester.exe\`" >> $GITHUB_STEP_SUMMARY
-          echo "3. Test with ASIO loopback" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status**: Deployed and running" >> $GITHUB_STEP_SUMMARY
