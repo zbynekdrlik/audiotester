@@ -11,7 +11,7 @@ export default defineConfig({
   webServer: {
     command: `cargo run -p audiotester-server --bin test-server`,
     url: `http://127.0.0.1:${process.env.PORT || 8920}/api/v1/status`,
-    reuseExistingServer: !process.env.CI,
+    reuseExistingServer: !!process.env.CI,
     timeout: 120_000,
     env: {
       PORT: process.env.PORT || "8920",
