@@ -184,15 +184,15 @@ impl Analyzer {
             }
         }
 
-        // Normalize confidence by reference energy
+        // Normalize confidence by reference energy (guard against near-zero energy)
         let ref_energy: f32 = self.reference.iter().map(|x| x * x).sum();
-        let confidence = if ref_energy > 0.0 {
+        let confidence = if ref_energy > 1e-10 {
             max_val / ref_energy.sqrt()
         } else {
             0.0
         };
 
-        (max_idx, confidence.min(1.0))
+        (max_idx, confidence.clamp(0.0, 1.0))
     }
 
     /// Detect sample loss based on latency changes (legacy heuristic)

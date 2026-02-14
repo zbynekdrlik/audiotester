@@ -150,8 +150,8 @@ impl BurstDetector {
             self.samples_since_detection = 0;
             self.peak_envelope = self.envelope;
 
-            let snr_estimate = if self.noise_floor > 0.0001 {
-                (self.envelope / self.noise_floor).log10() * 20.0
+            let snr_estimate = if self.noise_floor > 1e-6 {
+                ((self.envelope / self.noise_floor).log10() * 20.0).clamp(-60.0, 120.0)
             } else {
                 60.0 // Very clean signal
             };
