@@ -4,6 +4,24 @@
 
 Windows ASIO audio testing application for monitoring professional audio paths (Dante, VBAN, VBMatrix). The application runs as a Tauri 2 desktop app with system tray, web UI via Leptos SSR on Axum, and remote access from any browser on the LAN.
 
+## Quality Philosophy: Real Hardware E2E Testing
+
+**CRITICAL: This project prioritizes E2E testing on REAL HARDWARE over all other testing methods.**
+
+The primary quality gate is deployment to `iem.lan` with the VASIO-8 interface. Every push to `dev` MUST pass full hardware verification before a PR can be created. There are NO nightly builds, NO parameterized CI runs, NO separate test suites - ONE comprehensive flow validates everything.
+
+### E2E Testing Hierarchy
+
+| Priority        | Test Type      | Location                 | Purpose                      |
+| --------------- | -------------- | ------------------------ | ---------------------------- |
+| **1 (HIGHEST)** | Hardware E2E   | `iem.lan` CI smoke tests | Real ASIO + VASIO-8 loopback |
+| **2**           | Playwright E2E | `e2e/*.spec.ts`          | Full browser/API flows       |
+| **3**           | Rust E2E       | `tests/e2e_*.rs`         | Signal/latency/loss logic    |
+| **4**           | Integration    | `tests/integration/`     | Component boundaries         |
+| **5 (LOWEST)**  | Unit           | crate `tests` modules    | Isolated functions           |
+
+**Always write E2E tests FIRST. Unit tests support E2E, not replace them.**
+
 ## Temporary Approvals
 
 - **Agent is NOT approved to merge PRs** - User will manually verify dev deployments on iem.lan before approving PR merges to `main`. The dev-push CI pipeline deploys to iem.lan for testing, and the user will confirm the deployment is working before authorizing any merge.
@@ -40,20 +58,20 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 
 ## TDD - STRICTLY MANDATORY (NO EXCEPTIONS)
 
-**CRITICAL: The agent MUST write tests BEFORE writing ANY implementation code.**
+**CRITICAL: The agent MUST write E2E tests BEFORE writing ANY implementation code.**
 
-This is not optional. Every bug fix, every feature, every change MUST have tests written FIRST.
+This is not optional. Every bug fix, every feature, every change MUST have E2E tests written FIRST. Unit tests support E2E but do NOT replace them.
 
 ### TDD Workflow (MUST FOLLOW)
 
-1. **RED - Write failing tests FIRST**
-   - Create test file BEFORE touching implementation
+1. **RED - Write failing E2E tests FIRST**
+   - Prefer Playwright tests (`e2e/*.spec.ts`) for user-facing features
+   - Use Rust E2E tests (`tests/e2e_*.rs`) for signal/audio logic
    - Tests MUST fail (compilation errors count as failures)
-   - Tests MUST cover the actual bug/feature being fixed
-   - Example: If tray icon doesn't change colors, write test that verifies color changes
+   - Tests MUST exercise the FULL user flow, not just isolated functions
 
 2. **GREEN - Implement minimal code**
-   - Write ONLY enough code to make tests pass
+   - Write ONLY enough code to make E2E tests pass
    - Do NOT write "extra" code not covered by tests
    - Run tests after EVERY change
 
@@ -61,40 +79,49 @@ This is not optional. Every bug fix, every feature, every change MUST have tests
    - Keep tests green while improving code
    - Run full test suite before committing
 
-### Test Priority by Issue Type
+### Test Priority by Issue Type (ALWAYS E2E FIRST)
 
-| Issue Type | Test Location    | Example                       |
-| ---------- | ---------------- | ----------------------------- |
-| UI Bug     | `tests/e2e_*.rs` | Tray icon color not changing  |
-| ASIO Error | `tests/e2e_*.rs` | Reconnection on buffer change |
-| API Bug    | `tests/e2e_*.rs` | Device info not showing       |
-| Logic Bug  | Unit tests       | Incorrect latency calculation |
+| Issue Type   | Primary Test                 | Secondary Test              | Example                       |
+| ------------ | ---------------------------- | --------------------------- | ----------------------------- |
+| UI Bug       | `e2e/*.spec.ts`              | `tests/e2e_*.rs`            | Dashboard not updating        |
+| ASIO Error   | `e2e/hardware-smoke.spec.ts` | `tests/e2e_reconnection.rs` | Reconnection on buffer change |
+| API Bug      | `e2e/api.spec.ts`            | `tests/e2e_dashboard.rs`    | Device info missing           |
+| WebSocket    | `e2e/websocket.spec.ts`      | -                           | Stats not streaming           |
+| Tray Icon    | `tests/e2e_tray.rs`          | Unit tests                  | Color not changing            |
+| Signal Logic | `tests/e2e_signal.rs`        | Unit tests                  | Latency calculation           |
 
-### What Tests MUST Verify
+**The PRIMARY test is ALWAYS E2E. Unit tests are SECONDARY support.**
 
-- **Tray icon**: Test `status_from_analysis()` returns correct status for ALL conditions
-- **Reconnection**: Test that stats are preserved, backoff is correct
-- **Dashboard**: Test API returns correct data structure
-- **Loss detection**: Test immediate incrementing, not batched
+### What E2E Tests MUST Verify
+
+For EVERY feature/bugfix, your E2E test must cover:
+
+1. **Full user flow** - From user action to visible result
+2. **API contract** - Correct request/response format
+3. **WebSocket propagation** - Real-time updates work
+4. **State after refresh** - Data survives page reload
+5. **Error states** - Graceful handling of failures
+6. **Hardware interaction** - Works on iem.lan (if applicable)
 
 ### TDD Commit Pattern
 
 ```
-git commit -m "test: add failing tests for feature X"  # RED - tests fail
-git commit -m "feat: implement feature X"               # GREEN - tests pass
-git commit -m "refactor: clean up feature X"            # REFACTOR
+git commit -m "test: add failing E2E tests for feature X"  # RED - tests fail
+git commit -m "feat: implement feature X"                   # GREEN - tests pass
+git commit -m "refactor: clean up feature X"                # REFACTOR
 ```
 
 ### ENFORCEMENT
 
 The agent MUST NOT:
 
-- Write implementation code before tests
+- Write implementation code before E2E tests
+- Write ONLY unit tests (E2E is mandatory)
 - Skip tests because "it's a small change"
-- Write tests after implementation (this defeats the purpose)
+- Write tests after implementation (defeats the purpose)
 - Ignore failing tests
 
-If agent violates TDD, user should reject the PR and require proper TDD approach.
+**If CI fails on iem.lan hardware, the PR CANNOT be created.** Fix the issue first.
 
 ## Strict CI/CD Requirements
 
@@ -104,30 +131,65 @@ If agent violates TDD, user should reject the PR and require proper TDD approach
 - **NO false positives** - Tests must fail on actual regressions, never pass incorrectly
 - **NO ignored failures** - Every CI job must pass for PR to be green
 - **Hardware verification required** - Deploy smoke tests on iem.lan must pass
+- **NO PR before CI passes** - Agent must wait for full CI completion before creating PR
 
-### Meta-Test Requirements
+### What "CI Passes" Means
 
-- Run `tests/meta_tests.rs` to verify test suite integrity
-- No PRs merge if any tests are skipped or ignored
-- Latency measurements must be bounded (no aliasing artifacts)
-- Loss detection must be accurate (no false positives from latency cycling)
+For a PR to be created, ALL of the following must be true:
 
-### CI Gate Rules
+1. `git push origin dev` completes successfully
+2. ALL GitHub Actions jobs show green checkmarks:
+   - `branch-check` ✅
+   - `main-sync` ✅
+   - `fmt` ✅
+   - `clippy` ✅
+   - `build` ✅
+   - `test` ✅
+   - `e2e` ✅
+   - `playwright` ✅
+   - `build-dev` ✅
+   - `deploy-dev` ✅
+   - `ci-success` ✅
+3. Hardware smoke tests on iem.lan pass:
+   - VASIO-8 device connected
+   - Monitoring active
+   - Latency in range (0-100ms)
+   - Sample loss acceptable
 
-| Check      | Blocking? | Description                   |
-| ---------- | --------- | ----------------------------- |
-| fmt        | Yes       | Code must be formatted        |
-| clippy     | Yes       | No warnings allowed           |
-| build      | Yes       | Must compile                  |
-| test       | Yes       | All unit tests pass           |
-| e2e        | Yes       | All E2E tests pass            |
-| playwright | Yes       | All browser tests pass        |
-| deploy-dev | Yes       | Hardware smoke tests pass     |
-| meta-tests | Yes       | Test suite integrity verified |
+**If ANY job fails, fix and push again. Do NOT create PR until CI is fully green.**
+
+### CI Gate Rules (ALL BLOCKING)
+
+| Check      | Blocking? | What It Validates                         |
+| ---------- | --------- | ----------------------------------------- |
+| fmt        | **YES**   | Code formatting (`cargo fmt --check`)     |
+| clippy     | **YES**   | No warnings (`-D warnings`)               |
+| build      | **YES**   | Debug + release compilation               |
+| test       | **YES**   | All workspace unit + integration tests    |
+| e2e        | **YES**   | Rust E2E tests (`tests/e2e_*.rs`)         |
+| playwright | **YES**   | Browser E2E tests (`e2e/*.spec.ts`)       |
+| build-dev  | **YES**   | Release binary builds successfully        |
+| deploy-dev | **YES**   | Deploys to iem.lan + hardware smoke tests |
+| ci-success | **YES**   | All jobs passed - final gate              |
+
+### Hardware Smoke Test Criteria
+
+The `deploy-dev` job validates on REAL hardware:
+
+| Check           | Threshold        | What It Catches    |
+| --------------- | ---------------- | ------------------ |
+| Process running | Must be running  | Crash on startup   |
+| Web server      | Response < 20s   | Server deadlock    |
+| API status      | Valid JSON       | Response format    |
+| Device          | Contains "VASIO" | Device selection   |
+| Monitoring      | `true`           | Auto-start failure |
+| Latency         | 0-100ms          | Aliasing, cycling  |
+| Sample loss     | < 1000/10s       | Buffer issues      |
+| Two-point       | Stable           | Drift detection    |
 
 ### Audio Measurement Quality Standards
 
-- **Latency**: Must be stable 1-50ms range for loopback, no cycling
+- **Latency**: Must be stable 1-50ms range for loopback, no cycling to 341ms/682ms
 - **Sample loss**: Must be zero for healthy connections
 - **Confidence**: Cross-correlation confidence > 0.5 for valid measurements
 - **Tray icon**: Must reflect actual status (green/orange/red/gray)
@@ -252,38 +314,76 @@ The CI workflow will FAIL if:
 
 ## Testing Strategy
 
-### E2E Tests (Highest Priority)
+### E2E-First Development (MANDATORY)
 
-- `tests/e2e_signal.rs` - MLS generation and properties (10 tests)
-- `tests/e2e_latency.rs` - Latency measurement accuracy (11 tests)
-- `tests/e2e_loss.rs` - Sample loss detection (11 tests)
+**Every feature/bugfix MUST include E2E tests that exercise the FULL user-facing flow.**
 
-### Integration Tests
+The goal is comprehensive end-to-end coverage that prevents regressions on real hardware. Writing isolated unit tests without corresponding E2E tests is NOT acceptable.
 
-- `tests/integration/audio_loop.rs` - Full audio path (mocked ASIO)
+### Playwright E2E (Browser + API) - `e2e/*.spec.ts`
 
-### Unit Tests
+| Test File                 | Coverage                                              |
+| ------------------------- | ----------------------------------------------------- |
+| `dashboard.spec.ts`       | Full dashboard load, WebSocket stats, graph rendering |
+| `api.spec.ts`             | REST API endpoints, status, stats, devices, config    |
+| `websocket.spec.ts`       | Real-time updates, reconnection, message format       |
+| `settings.spec.ts`        | Device selection, sample rate, buffer size            |
+| `monitoring-flow.spec.ts` | Start/stop monitoring, state transitions              |
+| `hardware-smoke.spec.ts`  | VASIO-8 specific checks (CI runs on iem.lan)          |
 
-- `crates/audiotester-core/` - Audio engine, signal, analyzer, stats (21 tests)
-- `crates/audiotester-server/` - API serialization tests (4 tests)
+**Playwright tests MUST simulate real user workflows, not just API calls.**
+
+### Rust E2E Tests - `tests/e2e_*.rs`
+
+| Test File                 | Coverage                                |
+| ------------------------- | --------------------------------------- |
+| `e2e_signal.rs`           | MLS generation, properties, correlation |
+| `e2e_latency.rs`          | Latency measurement accuracy, bounds    |
+| `e2e_loss.rs`             | Sample loss detection, counting         |
+| `e2e_tray.rs`             | Tray icon status logic                  |
+| `e2e_tray_integration.rs` | Full tray status flow                   |
+| `e2e_dashboard.rs`        | Dashboard API response structure        |
+| `e2e_reconnection.rs`     | ASIO reconnection, state preservation   |
+
+### Hardware Smoke Tests (CI on iem.lan)
+
+These tests run in CI on every `dev` push and validate against REAL hardware:
+
+```yaml
+# From ci.yml deploy-dev job
+- Verify VASIO-8 device is connected and selected
+- Verify monitoring is active
+- Verify latency is in expected range (0-100ms)
+- Verify sample loss rate is acceptable (<1000/10s)
+- Two-point measurement to detect cycling/aliasing
+```
+
+**Hardware smoke tests are BLOCKING - PR cannot be created until they pass.**
+
+### What E2E Tests MUST Cover
+
+When adding a new feature, your E2E test MUST verify:
+
+1. **User-visible behavior** - What the user sees/clicks
+2. **API contract** - Request/response format
+3. **WebSocket flow** - Real-time update propagation
+4. **State persistence** - Data survives page refresh
+5. **Error handling** - Graceful failure modes
+6. **Hardware integration** - Works on iem.lan (if applicable)
 
 ### Running Tests
 
 ```bash
-# All workspace tests
-cargo test --workspace
+# FULL CI-equivalent flow (always run before PR)
+cargo fmt --all --check && \
+cargo clippy --workspace --all-targets --all-features -- -D warnings && \
+cargo test --workspace && \
+npx playwright test
 
-# Core library only
-cargo test -p audiotester-core
-
-# Server only
-cargo test -p audiotester-server
-
-# E2E only
-cargo test --test 'e2e_*'
-
-# With output
-cargo test -- --nocapture
+# Specific test suites
+cargo test --test 'e2e_*' -- --nocapture  # Rust E2E
+npx playwright test e2e/dashboard.spec.ts  # Single Playwright
+npx playwright test --headed                # Visual debugging
 ```
 
 ## Signal Processing Notes
@@ -309,23 +409,73 @@ latency_ms = latency_samples / sample_rate * 1000
 
 ## Common Tasks
 
-### Adding a New Feature
+### Adding a New Feature (STRICT WORKFLOW)
 
-1. Ensure you are on `dev` branch: `git checkout dev && git pull`
-2. Write E2E tests first
-3. Implement feature
-4. Run `cargo fmt && cargo clippy --workspace -- -D warnings`
-5. Run `cargo test --workspace`
-6. Commit with descriptive message: `git commit -m "Add feature X"`
-7. Push to dev: `git push origin dev`
-8. When ready for release, open PR from `dev` to `main`
+**Every feature follows this EXACT flow. No shortcuts.**
+
+```
+1. Sync dev branch
+   └─> git checkout dev && git pull origin dev
+
+2. Write failing E2E tests (TDD RED)
+   ├─> Playwright: e2e/[feature].spec.ts
+   └─> Rust: tests/e2e_[feature].rs
+
+3. Verify tests fail
+   └─> npx playwright test && cargo test --test 'e2e_*'
+
+4. Implement feature (TDD GREEN)
+   └─> Write minimal code to make tests pass
+
+5. Verify tests pass locally
+   └─> cargo fmt && cargo clippy --workspace -- -D warnings && cargo test --workspace && npx playwright test
+
+6. Commit (E2E test commit FIRST)
+   ├─> git commit -m "test: add E2E tests for feature X"
+   └─> git commit -m "feat: implement feature X"
+
+7. Push to dev (triggers FULL CI)
+   └─> git push origin dev
+
+8. WAIT for CI to complete
+   ├─> All tests must pass
+   ├─> deploy-dev must succeed
+   └─> Hardware smoke tests must pass on iem.lan
+
+9. Verify on iem.lan manually
+   └─> Open http://iem.lan:8920 and test feature
+
+10. Create PR from dev to main
+    └─> gh pr create --base main --head dev
+
+11. User verifies and merges
+    └─> Auto-release deploys to production
+```
+
+**Steps 7-8 are BLOCKING. If CI fails, fix and push again. NO PR until CI passes.**
+
+### Fixing a Bug (STRICT WORKFLOW)
+
+```
+1. Sync dev and understand the bug
+2. Write E2E test that reproduces the bug (must FAIL)
+3. Verify test fails with expected error
+4. Fix the bug
+5. Verify test passes
+6. Run full test suite
+7. Commit: "test: reproduce bug X" then "fix: resolve bug X"
+8. Push to dev
+9. WAIT for CI including iem.lan hardware tests
+10. Create PR only after CI passes
+```
 
 ### Debugging Audio Issues
 
 - Enable trace logging: `RUST_LOG=audiotester=trace cargo run -p audiotester-app`
 - Check ASIO device list: Look for "ASIO" in device names
 - Verify sample rate matches between devices
-- Check web UI at http://localhost:8920
+- Check web UI at http://localhost:8920 (local) or http://iem.lan:8920 (test machine)
+- Monitor CI deploy-dev job for hardware test results
 
 ## Performance Targets
 
@@ -338,28 +488,83 @@ latency_ms = latency_samples / sample_rate * 1000
 
 **ALL compilation, testing, and releases MUST happen through GitHub CI/CD workflows.**
 
-### What CI/CD Does
+### Single Comprehensive Flow (NO Nightly/Parameterized CI)
 
-- `ci.yml` - Runs on every push to `dev` and PRs to `main`:
-  - Format check (`cargo fmt --all`)
-  - Lint check (`cargo clippy --workspace`)
-  - Build workspace (debug + release)
-  - Unit tests (all workspace crates)
-  - E2E tests
-  - Branch policy enforcement
+This project uses ONE workflow that does EVERYTHING. There are no separate:
 
-- `auto-release.yml` - Runs automatically on push to `main` (after PR merge):
-  - Determines next version (auto-increments patch from latest tag)
-  - Builds Tauri app release binary
-  - Creates git tag and GitHub Release
-  - Deploys to test machine (iem.lan) via self-hosted runner
+- Nightly builds (nobody runs them)
+- Parameterized matrix jobs (complexity without benefit)
+- Manual test triggers (gets forgotten)
+- Separate security scans (integrated in main flow)
 
-- `deploy.yml` - Manual re-deploy only (`workflow_dispatch`):
-  - Re-deploys a specific version to iem.lan
+**Every `dev` push runs the FULL validation including hardware deployment.**
+
+### CI Jobs (ALL BLOCKING)
+
+| Job            | Runs On    | What It Does                               |
+| -------------- | ---------- | ------------------------------------------ |
+| `branch-check` | `push/PR`  | Enforce main/dev only policy               |
+| `main-sync`    | `dev push` | Ensure dev includes all main commits       |
+| `fmt`          | `all`      | Format check (`cargo fmt --all --check`)   |
+| `clippy`       | `all`      | Lint check (`cargo clippy -- -D warnings`) |
+| `build`        | `all`      | Debug + release compilation                |
+| `test`         | `all`      | All workspace unit + integration tests     |
+| `e2e`          | `all`      | Rust E2E tests (`tests/e2e_*.rs`)          |
+| `playwright`   | `all`      | Browser E2E tests (`e2e/*.spec.ts`)        |
+| `build-dev`    | `dev push` | Build release binary                       |
+| `deploy-dev`   | `dev push` | Deploy to iem.lan + hardware smoke tests   |
+| `ci-success`   | `all`      | Final gate - ALL jobs must pass            |
+
+**STRICT: Every job is blocking. There are no "allowed to fail" jobs.**
+
+### Hardware Verification Flow
+
+```
+dev push → build → deploy to iem.lan → smoke tests on VASIO-8 → PASS required
+```
+
+The `deploy-dev` job performs these hardware validations:
+
+1. Process starts and stays running
+2. Web server responds within 20s
+3. API returns valid status
+4. VASIO-8 device detected and selected
+5. Monitoring active
+6. Latency in range (0-100ms, catches aliasing)
+7. Sample loss acceptable (<1000 in 10s)
+8. Two-point measurement (detects cycling)
+
+### Auto-Release Flow (main only)
+
+```
+PR merge to main → version++ → build → release → deploy → smoke tests
+```
+
+Fully automatic - NO manual tagging or version bumping required.
+
+### State-of-the-Art CI Improvements (Implemented)
+
+| Feature                | Status | Description                       |
+| ---------------------- | ------ | --------------------------------- |
+| Single flow            | ✅     | One workflow validates everything |
+| Hardware gate          | ✅     | Real ASIO tested every commit     |
+| Branch protection      | ✅     | Only dev→main PRs allowed         |
+| Main sync check        | ✅     | Dev must include all main commits |
+| Auto-versioning        | ✅     | Semver auto-increment             |
+| Self-hosted runner     | ✅     | Deploys to iem.lan                |
+| Scheduled task restart | ✅     | Auto-start on machine reboot      |
+
+### Future CI Improvements to Consider
+
+| Feature                | Priority | Description                       |
+| ---------------------- | -------- | --------------------------------- |
+| Cargo audit            | HIGH     | Check for vulnerable dependencies |
+| SBOM generation        | MEDIUM   | Software bill of materials        |
+| Binary size tracking   | MEDIUM   | Alert on size regression          |
+| Performance benchmarks | LOW      | Catch latency regressions         |
+| Coverage gates         | LOW      | Minimum coverage threshold        |
 
 ### Required GitHub Secrets
-
-For automated deployment to work, these secrets must be configured:
 
 | Secret         | Value     |
 | -------------- | --------- |
@@ -367,11 +572,11 @@ For automated deployment to work, these secrets must be configured:
 | `IEM_USER`     | `iem`     |
 | `IEM_PASSWORD` | `iem`     |
 
-### Workflow
+### The Golden Rule
 
-```
-Code → Push to dev → CI builds & tests → PR to main → CI validates → Merge → Auto version bump → Build → Release → Deploy to iem.lan
-```
+**If CI passes on `dev`, the code is ready for production.**
+
+There is no "works on my machine" - if iem.lan hardware tests pass, the code works.
 
 ## Test Machine (iem.lan)
 
