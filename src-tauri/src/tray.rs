@@ -24,60 +24,12 @@ pub enum TrayStatus {
 /// based on analysis results.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrayStatusEvent {
-    /// Status level: "ok", "warning", "error", "disconnected"
-    pub status: String,
+    /// Status level
+    pub status: TrayStatus,
     /// Current measured latency in milliseconds
     pub latency_ms: f64,
     /// Number of lost samples in this measurement
     pub lost_samples: u64,
-}
-
-impl TrayStatusEvent {
-    /// Convert string status to TrayStatus enum
-    pub fn to_tray_status(&self) -> TrayStatus {
-        match self.status.as_str() {
-            "ok" => TrayStatus::Ok,
-            "warning" => TrayStatus::Warning,
-            "error" => TrayStatus::Error,
-            _ => TrayStatus::Disconnected,
-        }
-    }
-
-    /// Create an Ok status event
-    pub fn ok(latency_ms: f64) -> Self {
-        Self {
-            status: "ok".to_string(),
-            latency_ms,
-            lost_samples: 0,
-        }
-    }
-
-    /// Create a Warning status event
-    pub fn warning(latency_ms: f64, lost_samples: u64) -> Self {
-        Self {
-            status: "warning".to_string(),
-            latency_ms,
-            lost_samples,
-        }
-    }
-
-    /// Create an Error status event
-    pub fn error(latency_ms: f64, lost_samples: u64) -> Self {
-        Self {
-            status: "error".to_string(),
-            latency_ms,
-            lost_samples,
-        }
-    }
-
-    /// Create a Disconnected status event
-    pub fn disconnected() -> Self {
-        Self {
-            status: "disconnected".to_string(),
-            latency_ms: 0.0,
-            lost_samples: 0,
-        }
-    }
 }
 
 /// Icon size in pixels
@@ -97,8 +49,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
         None::<&str>,
     )?;
     let separator2 = PredefinedMenuItem::separator(app)?;
-    let toggle_item = MenuItem::with_id(app, "toggle", "Stop Monitoring", true, None::<&str>)?;
-    let separator3 = PredefinedMenuItem::separator(app)?;
     let quit_item = MenuItem::with_id(app, "quit", "Exit", true, None::<&str>)?;
 
     let menu = Menu::with_items(
@@ -109,8 +59,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             &dashboard_item,
             &remote_item,
             &separator2,
-            &toggle_item,
-            &separator3,
             &quit_item,
         ],
     )?;
@@ -129,10 +77,6 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 }
                 "remote" => {
                     show_remote_url(app);
-                }
-                "toggle" => {
-                    tracing::info!("Toggle monitoring requested from tray");
-                    // Toggle is handled by the main app loop
                 }
                 "quit" => {
                     tracing::info!("Exit requested from tray");
