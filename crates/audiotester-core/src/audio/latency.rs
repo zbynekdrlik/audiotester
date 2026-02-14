@@ -295,6 +295,15 @@ impl LatencyAnalyzer {
         self.sample_rate
     }
 
+    /// Clear pending (unmatched) bursts.
+    ///
+    /// Called when signal is lost to discard stale burst events that
+    /// accumulated during the outage. Without this, recovery would match
+    /// the first detection against a stale burst, producing wrong latency.
+    pub fn clear_pending(&mut self) {
+        self.pending_bursts.clear();
+    }
+
     /// Reset analyzer state
     pub fn reset(&mut self) {
         self.detector.reset();
