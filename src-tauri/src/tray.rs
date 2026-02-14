@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
-use tauri::tray::TrayIconBuilder;
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager};
 
 /// Status colors for the tray icon
@@ -88,7 +88,14 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let status_item = MenuItem::with_id(app, "status", "Status: Starting...", false, None::<&str>)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
     let dashboard_item = MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
-    let remote_item = MenuItem::with_id(app, "remote", "Remote Access URL", true, None::<&str>)?;
+    let remote_url = get_remote_url();
+    let remote_item = MenuItem::with_id(
+        app,
+        "remote",
+        format!("Remote: {}", remote_url),
+        true,
+        None::<&str>,
+    )?;
     let separator2 = PredefinedMenuItem::separator(app)?;
     let toggle_item = MenuItem::with_id(app, "toggle", "Stop Monitoring", true, None::<&str>)?;
     let separator3 = PredefinedMenuItem::separator(app)?;
@@ -134,6 +141,20 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                 _ => {}
             }
         })
+        .on_tray_icon_event(|tray, event| {
+            // Left-click opens dashboard directly (no menu)
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                if let Some(window) = tray.app_handle().get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        })
         .build(app)?;
 
     Ok(())
@@ -152,15 +173,26 @@ fn open_dashboard(app: &AppHandle) {
     }
 }
 
+/// Get the remote access URL (IP-based for LAN access)
+///
+/// Returns the URL using the local IP address for easy access from
+/// other devices on the network.
+pub fn get_remote_url() -> String {
+    let port = 8920;
+    let ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "localhost".to_string())
+        });
+    format!("http://{}:{}", ip, port)
+}
+
 /// Show the remote access URL in the log (for clipboard)
 fn show_remote_url(_app: &AppHandle) {
-    let port = 8920;
-    // Get the machine's hostname for LAN access
-    let hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "localhost".to_string());
-    let url = format!("http://{}:{}", hostname, port);
+    let url = get_remote_url();
     tracing::info!("Remote access URL: {}", url);
     // In a full implementation, this would copy to clipboard
     // For now, log it so the user can see it in the console
