@@ -246,9 +246,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
-                // Check if signal is valid based on confidence
-                // Low confidence (< 0.3) indicates no valid signal (loopback disconnected)
-                let has_valid_signal = result.confidence >= 0.3;
+                // Check if signal is valid:
+                // 1. Latency must be in valid range (1-100ms for loopback)
+                //    - >100ms indicates MLS period aliasing (no real correlation peak)
+                // 2. Confidence must be above threshold
+                let latency_valid = result.latency_ms > 0.0 && result.latency_ms < 100.0;
+                let confidence_valid = result.confidence >= 0.3;
+                let has_valid_signal = latency_valid && confidence_valid;
 
                 if has_valid_signal {
                     // Update last successful analysis time only for valid signals
@@ -260,32 +264,23 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
-                        tracing::info!("Signal restored (confidence: {:.2})", result.confidence);
-                    }
-                } else {
-                    // Low confidence - check for signal timeout
-                    if let Some(last) = last_successful_analysis {
-                        if last.elapsed() > Duration::from_secs(1) && !signal_lost {
-                            signal_lost = true;
-                            if let Ok(mut store) = stats.lock() {
-                                store.set_signal_lost(true);
-                            }
-                            tracing::warn!(
-                                "No signal detected (low confidence: {:.2})",
-                                result.confidence
-                            );
-                        }
-                    } else if !signal_lost {
-                        // Never had a valid signal, set signal_lost after 1s of low confidence
-                        signal_lost = true;
-                        if let Ok(mut store) = stats.lock() {
-                            store.set_signal_lost(true);
-                        }
-                        tracing::warn!(
-                            "No signal detected (low confidence: {:.2}, no prior valid signal)",
+                        tracing::info!(
+                            "Signal restored (latency: {:.2}ms, confidence: {:.2})",
+                            result.latency_ms,
                             result.confidence
                         );
                     }
+                } else if !signal_lost {
+                    // Invalid signal - set signal_lost immediately
+                    signal_lost = true;
+                    if let Ok(mut store) = stats.lock() {
+                        store.set_signal_lost(true);
+                    }
+                    tracing::warn!(
+                        "No signal detected (latency: {:.2}ms, confidence: {:.2})",
+                        result.latency_ms,
+                        result.confidence
+                    );
                 }
 
                 // Reset failure counter on successful analysis
