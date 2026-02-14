@@ -26,6 +26,59 @@ The primary quality gate is deployment to `iem.lan` with the VASIO-8 interface. 
 
 - **Agent is NOT approved to merge PRs** - User will manually verify dev deployments on iem.lan before approving PR merges to `main`. The dev-push CI pipeline deploys to iem.lan for testing, and the user will confirm the deployment is working before authorizing any merge.
 
+## MANDATORY Self-Verification (STRICTLY ENFORCED)
+
+**CRITICAL: The agent MUST verify ALL features/fixes on iem.lan BEFORE presenting them to the user.**
+
+The user is NOT a tester. The user is here only to confirm that the agent's approach was correct. The agent is FULLY RESPONSIBLE for:
+
+1. **Testing on real hardware** - Every feature MUST be verified working on iem.lan
+2. **Checking logs** - Console output, tracing logs, error messages
+3. **Verifying UI behavior** - Dashboard updates, tray icon changes, real-time data
+4. **Testing edge cases** - Disconnect scenarios, error states, reconnection
+
+### Self-Verification Workflow (MANDATORY)
+
+```
+1. Push to dev → CI deploys to iem.lan
+2. SSH to iem.lan and verify:
+   - Check process logs: Get-Process audiotester, check console output
+   - Check dashboard: curl http://iem.lan:8920/api/v1/stats
+   - Test feature manually via web UI or API
+   - Verify real behavior matches expected behavior
+3. If verification FAILS → Fix and repeat
+4. If verification PASSES → ONLY THEN present to user
+```
+
+### What Agent MUST Verify Before Presenting to User
+
+| Feature Type     | Verification Steps                                              |
+| ---------------- | --------------------------------------------------------------- |
+| API endpoint     | `curl` the endpoint, verify response format and values          |
+| Dashboard UI     | Open http://iem.lan:8920, verify element displays correctly     |
+| Signal detection | Disconnect loopback, verify status changes in dashboard AND API |
+| Tray icon        | Check icon color changes with audio state                       |
+| WebSocket        | Verify real-time updates in browser dev tools                   |
+
+### NEVER Present Untested Features
+
+The agent MUST NOT:
+
+- Ask user to "test if it works"
+- Deliver features without self-verification
+- Assume CI passing means feature works correctly
+- Skip manual verification because "it compiled"
+
+**If the agent cannot verify a feature works, the agent MUST NOT claim it is ready.**
+
+### Available Verification Tools on iem.lan
+
+- SSH access: `ssh iem@iem.lan` (password: iem)
+- Web UI: http://iem.lan:8920
+- API: `curl http://iem.lan:8920/api/v1/stats`
+- VBMatrix: Running on desktop, has API for routing control
+- PowerShell: Full admin access for process inspection
+
 ## Agent Behavior
 
 - Act as a highly skilled Rust/ASIO developer with expertise in real-time audio processing
