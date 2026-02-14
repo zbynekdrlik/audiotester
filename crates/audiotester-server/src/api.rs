@@ -60,13 +60,6 @@ pub struct LossEventResponse {
     pub count: u64,
 }
 
-/// Reset response
-#[derive(Serialize)]
-pub struct ResetResponse {
-    pub success: bool,
-    pub message: String,
-}
-
 /// Device info response
 #[derive(Serialize)]
 pub struct DeviceResponse {
@@ -179,18 +172,17 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
 /// POST /api/v1/reset
 ///
 /// Resets statistics counters (min/max/avg/totals) without clearing graph history.
-pub async fn reset_stats(State(state): State<AppState>) -> Json<ResetResponse> {
+pub async fn reset_stats(
+    State(state): State<AppState>,
+) -> Result<StatusCode, (StatusCode, String)> {
     if let Ok(mut store) = state.stats.lock() {
         store.reset_counters();
-        Json(ResetResponse {
-            success: true,
-            message: "Counters reset successfully. Graph history preserved.".to_string(),
-        })
+        Ok(StatusCode::NO_CONTENT)
     } else {
-        Json(ResetResponse {
-            success: false,
-            message: "Failed to acquire lock on stats store.".to_string(),
-        })
+        Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to acquire lock on stats store".to_string(),
+        ))
     }
 }
 
@@ -242,6 +234,12 @@ pub async fn update_config(
     Json(update): Json<ConfigUpdate>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, String)> {
     if let Some(rate) = update.sample_rate {
+        if !(8000..=384000).contains(&rate) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid sample rate: {} (must be 8000-384000 Hz)", rate),
+            ));
+        }
         state.engine.set_sample_rate(rate).await;
     }
 
@@ -290,12 +288,12 @@ pub async fn update_config(
 /// GET /api/v1/remote-url
 ///
 /// Returns the remote access URL for accessing the dashboard from other devices.
-pub async fn get_remote_url() -> Json<RemoteUrlResponse> {
+pub async fn get_remote_url(State(state): State<AppState>) -> Json<RemoteUrlResponse> {
     let ip = local_ip_address::local_ip()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|_| "localhost".to_string());
     Json(RemoteUrlResponse {
-        url: format!("http://{}:8920", ip),
+        url: format!("http://{}:{}", ip, state.config.port),
     })
 }
 

@@ -61,26 +61,33 @@
 
   function showDeviceInfo(device) {
     if (!device) {
-      deviceInfo.innerHTML = "<p>Select a device to see details.</p>";
+      deviceInfo.innerHTML = "";
+      var p = document.createElement("p");
+      p.textContent = "Select a device to see details.";
+      deviceInfo.appendChild(p);
       return;
     }
-    deviceInfo.innerHTML =
-      "<table>" +
-      "<tr><td>Name</td><td>" +
-      device.name +
-      "</td></tr>" +
-      "<tr><td>Input Ch</td><td>" +
-      device.input_channels +
-      "</td></tr>" +
-      "<tr><td>Output Ch</td><td>" +
-      device.output_channels +
-      "</td></tr>" +
-      "<tr><td>Sample Rates</td><td>" +
-      (device.sample_rates.length > 0
-        ? device.sample_rates.join(", ")
-        : "N/A") +
-      "</td></tr>" +
-      "</table>";
+    var table = document.createElement("table");
+    [
+      ["Name", device.name],
+      ["Input Ch", device.input_channels],
+      ["Output Ch", device.output_channels],
+      [
+        "Sample Rates",
+        device.sample_rates.length > 0 ? device.sample_rates.join(", ") : "N/A",
+      ],
+    ].forEach(function (row) {
+      var tr = document.createElement("tr");
+      var td1 = document.createElement("td");
+      var td2 = document.createElement("td");
+      td1.textContent = row[0];
+      td2.textContent = String(row[1]);
+      tr.appendChild(td1);
+      tr.appendChild(td2);
+      table.appendChild(tr);
+    });
+    deviceInfo.innerHTML = "";
+    deviceInfo.appendChild(table);
   }
 
   function updateMonitoringUI(running) {
@@ -98,30 +105,41 @@
   }
 
   // Event handlers
-  deviceSelect.addEventListener("change", function () {
+  deviceSelect.addEventListener("change", async function () {
     const name = deviceSelect.value;
     const device = devices.find(function (d) {
       return d.name === name;
     });
     showDeviceInfo(device);
 
-    // Update config
-    fetch("/api/v1/config", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        device: name,
-        sample_rate: parseInt(sampleRate.value),
-      }),
-    });
+    try {
+      const resp = await fetch("/api/v1/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          device: name,
+          sample_rate: parseInt(sampleRate.value),
+        }),
+      });
+      if (!resp.ok) throw new Error("Config update failed: " + resp.status);
+    } catch (e) {
+      console.error("Failed to update device:", e);
+      loadConfig();
+    }
   });
 
-  sampleRate.addEventListener("change", function () {
-    fetch("/api/v1/config", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sample_rate: parseInt(sampleRate.value) }),
-    });
+  sampleRate.addEventListener("change", async function () {
+    try {
+      const resp = await fetch("/api/v1/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sample_rate: parseInt(sampleRate.value) }),
+      });
+      if (!resp.ok) throw new Error("Config update failed: " + resp.status);
+    } catch (e) {
+      console.error("Failed to update sample rate:", e);
+      loadConfig();
+    }
   });
 
   startBtn.addEventListener("click", async function () {
