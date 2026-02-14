@@ -177,10 +177,16 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     expect(beforeStats.signal_lost).toBe(false);
     expect(beforeStats.current_latency).toBeLessThan(100);
 
-    // 2. Disconnect VASIO8 loopback via VBAN-TEXT
+    // 2. Disconnect VASIO8 loopback via VBAN-TEXT (mute both channels)
     await disconnectVasio8Loopback(vbmatrixHost);
 
-    // 3. Wait for signal detection to register the loss (up to 5 seconds)
+    // 3. Restart monitoring to re-establish ASIO stream with muted routing
+    //    VBMatrix mute only takes effect when the audio stream is restarted
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 1000));
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
+
+    // 4. Wait for signal detection to register the loss (up to 5 seconds)
     let signalLost = false;
     for (let i = 0; i < 10; i++) {
       await new Promise((r) => setTimeout(r, 500));
@@ -200,19 +206,30 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
   }) => {
     // Disconnect loopback
     await disconnectVasio8Loopback(vbmatrixHost);
+
+    // Restart monitoring to re-establish ASIO stream with muted routing
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 1000));
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
     await new Promise((r) => setTimeout(r, 3000));
 
     const resp = await request.get("/api/v1/stats");
     const stats = await resp.json();
 
     // Without real loopback, latency should be > 100ms (MLS period aliasing)
-    expect(stats.current_latency).toBeGreaterThan(100);
+    // or 0.0 (no correlation peak found at all)
+    expect(stats.current_latency === 0 || stats.current_latency > 100).toBe(
+      true,
+    );
     expect(stats.signal_lost).toBe(true);
   });
 
   test("signal recovers after loopback is reconnected", async ({ request }) => {
-    // 1. Disconnect loopback
+    // 1. Disconnect loopback and restart monitoring for mute to take effect
     await disconnectVasio8Loopback(vbmatrixHost);
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 1000));
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
     await new Promise((r) => setTimeout(r, 3000));
 
     // Verify signal is lost
@@ -223,14 +240,10 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     // 2. Reconnect loopback
     await reconnectVasio8Loopback(vbmatrixHost);
 
-    // 3. Restart monitoring to re-establish audio path
-    await request.post("/api/v1/monitoring", {
-      data: { enabled: false },
-    });
+    // 3. Restart monitoring to re-establish audio path with unmuted routing
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
     await new Promise((r) => setTimeout(r, 1000));
-    await request.post("/api/v1/monitoring", {
-      data: { enabled: true },
-    });
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
 
     // 4. Wait for signal to recover (up to 10 seconds)
     let recovered = false;
@@ -261,7 +274,12 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     // Disconnect loopback
     await disconnectVasio8Loopback(vbmatrixHost);
 
+    // Restart monitoring to re-establish ASIO stream with muted routing
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 1000));
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
+
     // Wait for dashboard to update via WebSocket
-    await expect(signalEl).toHaveText("NO SIGNAL", { timeout: 10_000 });
+    await expect(signalEl).toHaveText("NO SIGNAL", { timeout: 15_000 });
   });
 });
