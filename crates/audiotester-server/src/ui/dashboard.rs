@@ -38,6 +38,12 @@ fn DashboardPage() -> impl IntoView {
                         <a href="/" class="nav-link active">"Dashboard"</a>
                         <a href="/settings" class="nav-link">"Settings"</a>
                     </nav>
+                    <span
+                        class="remote-url"
+                        id="remote-url"
+                        data-testid="remote-url"
+                        title="Click to copy"
+                    ></span>
                     <div class="status-indicator" id="connection-status">"Connecting..."</div>
                 </header>
                 <main>
@@ -63,6 +69,11 @@ fn DashboardPage() -> impl IntoView {
                             <span class="info-label">"IN:"</span>
                             <span class="info-value" id="samples-received">"0"</span>
                         </div>
+                        <span
+                            class="signal-status"
+                            id="signal-status"
+                            data-testid="signal-status"
+                        >"Signal OK"</span>
                         <button class="btn-reset" id="reset-btn" title="Reset counters (preserves graph history)">"Reset"</button>
                     </div>
                     <section class="charts">

@@ -20,6 +20,8 @@
   const uptimeEl = document.getElementById("uptime-display");
   const samplesSentEl = document.getElementById("samples-sent");
   const samplesReceivedEl = document.getElementById("samples-received");
+  const signalStatusEl = document.getElementById("signal-status");
+  const remoteUrlEl = document.getElementById("remote-url");
   const resetBtn = document.getElementById("reset-btn");
 
   // Chart data
@@ -145,6 +147,18 @@
     if (samplesReceivedEl && stats.samples_received !== undefined) {
       samplesReceivedEl.textContent = formatSampleCount(stats.samples_received);
     }
+    // Update signal status
+    if (signalStatusEl) {
+      if (stats.signal_lost) {
+        signalStatusEl.textContent = "NO SIGNAL";
+        signalStatusEl.classList.add("warning");
+        signalStatusEl.classList.remove("ok");
+      } else {
+        signalStatusEl.textContent = "Signal OK";
+        signalStatusEl.classList.add("ok");
+        signalStatusEl.classList.remove("warning");
+      }
+    }
   }
 
   // Format large sample counts (e.g., 1.2M, 450K)
@@ -233,5 +247,38 @@
     drawChart("loss-chart", lossData, "#ff4040", "Lost samples");
   });
 
+  // Fetch and display remote URL
+  function loadRemoteUrl() {
+    if (!remoteUrlEl) return;
+    fetch("/api/v1/remote-url")
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (data) {
+        if (data.url) {
+          remoteUrlEl.textContent = data.url;
+          remoteUrlEl.style.cursor = "pointer";
+          remoteUrlEl.onclick = function () {
+            navigator.clipboard
+              .writeText(data.url)
+              .then(function () {
+                var originalText = remoteUrlEl.textContent;
+                remoteUrlEl.textContent = "Copied!";
+                setTimeout(function () {
+                  remoteUrlEl.textContent = originalText;
+                }, 1500);
+              })
+              .catch(function (err) {
+                console.error("Failed to copy:", err);
+              });
+          };
+        }
+      })
+      .catch(function (err) {
+        console.error("Failed to load remote URL:", err);
+      });
+  }
+
+  loadRemoteUrl();
   connect();
 })();
