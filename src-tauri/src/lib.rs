@@ -303,6 +303,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 // Record to stats store (preserve existing data - no clear!)
                 if let Ok(mut store) = stats.lock() {
                     store.record_latency(result.latency_ms);
+                    store.set_confidence(result.confidence);
                     if result.lost_samples > 0 {
                         store.record_loss(result.lost_samples as u64);
                     }

@@ -96,6 +96,8 @@ pub struct RunningStats {
     pub samples_received: u64,
     /// True when no signal is being received (analysis timeout)
     pub signal_lost: bool,
+    /// Last correlation confidence (0.0 to 1.0)
+    pub last_confidence: f32,
 }
 
 impl StatsStore {
@@ -403,6 +405,16 @@ impl StatsStore {
     /// Get signal lost state
     pub fn signal_lost(&self) -> bool {
         self.stats.signal_lost
+    }
+
+    /// Set last confidence value
+    pub fn set_confidence(&mut self, confidence: f32) {
+        self.stats.last_confidence = confidence;
+    }
+
+    /// Get last confidence value
+    pub fn confidence(&self) -> f32 {
+        self.stats.last_confidence
     }
 }
 
