@@ -45,11 +45,14 @@ fn build_stats_json(state: &AppState) -> Option<String> {
         measurement_count: stats.measurement_count,
         latency_history,
         loss_history,
-        device_name: None,
-        buffer_size: 0,
-        sample_rate: 0,
+        // Device info from cached stats (updated by monitoring loop)
+        device_name: stats.device_name,
+        buffer_size: stats.buffer_size,
+        sample_rate: stats.sample_rate,
         uptime_seconds: stats.uptime_seconds,
         loss_events,
+        samples_sent: stats.samples_sent,
+        samples_received: stats.samples_received,
     };
     serde_json::to_string(&response).ok()
 }

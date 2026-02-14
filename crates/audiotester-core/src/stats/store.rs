@@ -84,6 +84,16 @@ pub struct RunningStats {
     pub measurement_count: u64,
     /// Uptime in seconds since monitoring started
     pub uptime_seconds: u64,
+    /// Connected device name (cached from engine)
+    pub device_name: Option<String>,
+    /// Current sample rate (cached from engine)
+    pub sample_rate: u32,
+    /// Current buffer size (cached from engine)
+    pub buffer_size: u32,
+    /// Total samples sent since reset
+    pub samples_sent: u64,
+    /// Total samples received since reset
+    pub samples_received: u64,
 }
 
 impl StatsStore {
@@ -266,6 +276,8 @@ impl StatsStore {
         self.stats.total_corrupted = 0;
         self.stats.measurement_count = 0;
         self.stats.uptime_seconds = 0;
+        self.stats.samples_sent = 0;
+        self.stats.samples_received = 0;
     }
 
     /// Record a disconnection event
@@ -337,6 +349,38 @@ impl StatsStore {
     /// Set uptime seconds
     pub fn set_uptime(&mut self, seconds: u64) {
         self.stats.uptime_seconds = seconds;
+    }
+
+    /// Update device info (called from monitoring loop)
+    pub fn set_device_info(
+        &mut self,
+        device_name: Option<String>,
+        sample_rate: u32,
+        buffer_size: u32,
+    ) {
+        self.stats.device_name = device_name;
+        self.stats.sample_rate = sample_rate;
+        self.stats.buffer_size = buffer_size;
+    }
+
+    /// Increment samples sent counter
+    pub fn add_samples_sent(&mut self, count: u64) {
+        self.stats.samples_sent += count;
+    }
+
+    /// Increment samples received counter
+    pub fn add_samples_received(&mut self, count: u64) {
+        self.stats.samples_received += count;
+    }
+
+    /// Get samples sent since reset
+    pub fn samples_sent(&self) -> u64 {
+        self.stats.samples_sent
+    }
+
+    /// Get samples received since reset
+    pub fn samples_received(&self) -> u64 {
+        self.stats.samples_received
     }
 }
 
