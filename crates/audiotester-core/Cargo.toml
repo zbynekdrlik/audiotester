@@ -13,6 +13,9 @@ cpal = { version = "0.15", features = ["asio"] }
 # Lock-free ring buffer for audio
 ringbuf = "0.4"
 
+# Lock-free bounded MPSC channels for audio callbacks
+crossbeam-channel = "0.5"
+
 # FFT for cross-correlation
 rustfft = "6.2"
 
