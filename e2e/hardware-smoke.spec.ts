@@ -260,6 +260,46 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     expect(recovered).toBe(true);
   });
 
+  test("signal auto-recovers after loopback reconnect without manual restart", async ({
+    request,
+  }) => {
+    // This is the CRITICAL test: when VBMatrix routing changes,
+    // the app must auto-restart the ASIO stream to detect the change.
+    // The user should NOT need to manually restart monitoring.
+
+    // 1. Disconnect loopback + restart monitoring to establish lost state
+    await disconnectVasio8Loopback(vbmatrixHost);
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 1000));
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // Verify signal is lost
+    const lostResp = await request.get("/api/v1/stats");
+    const lostStats = await lostResp.json();
+    expect(lostStats.signal_lost).toBe(true);
+
+    // 2. Reconnect loopback in VBMatrix - NO monitoring restart!
+    //    The app must auto-detect and recover.
+    await reconnectVasio8Loopback(vbmatrixHost);
+
+    // 3. Wait for auto-recovery (up to 30 seconds)
+    //    The monitoring loop should detect sustained signal_lost and
+    //    auto-restart the ASIO stream to pick up routing changes.
+    let recovered = false;
+    for (let i = 0; i < 60; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (!stats.signal_lost && stats.current_latency < 100) {
+        recovered = true;
+        break;
+      }
+    }
+
+    expect(recovered).toBe(true);
+  });
+
   test("dashboard shows NO SIGNAL when loopback disconnected", async ({
     page,
     request,
