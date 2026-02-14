@@ -391,6 +391,50 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         }
                     }
                 }
+                // Auto-recovery: restart ASIO stream after sustained signal loss.
+                // This handles the Ok(None) case where no analysis results are
+                // produced (e.g., muted VBMatrix routing = no audio samples).
+                if signal_lost {
+                    if let Some(lost_at) = signal_lost_since {
+                        let lost_duration = lost_at.elapsed();
+                        let next_attempt_at = Duration::from_secs(5)
+                            + Duration::from_secs(10) * signal_recovery_attempts;
+                        if lost_duration >= next_attempt_at
+                            && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
+                        {
+                            signal_recovery_attempts += 1;
+                            tracing::info!(
+                                attempt = signal_recovery_attempts,
+                                lost_secs = lost_duration.as_secs(),
+                                "Signal lost (no analysis) - restarting ASIO stream"
+                            );
+
+                            if let Err(e) = engine.stop().await {
+                                tracing::debug!(error = %e, "Stop during signal recovery");
+                            }
+                            if let Some(ref device) = last_device_name {
+                                if let Err(e) = engine.select_device(device.clone()).await {
+                                    tracing::warn!(
+                                        error = %e,
+                                        "Re-select device during signal recovery"
+                                    );
+                                }
+                            }
+                            match engine.start().await {
+                                Ok(()) => {
+                                    tracing::info!("ASIO stream restarted for signal recovery")
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Failed to restart ASIO stream"
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Still broadcast stats so dashboard updates
                 audiotester_server::ws::broadcast_stats(&state);
             }
