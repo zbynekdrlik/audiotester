@@ -264,9 +264,9 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     request,
   }) => {
     // CRITICAL: When user mutes routes in VBMatrix, the app must detect
-    // signal loss WITHOUT any manual monitoring restart. The ASIO driver
-    // keeps delivering stale buffer data, so periodic stream probes are
-    // needed to detect routing changes.
+    // signal loss WITHOUT any manual monitoring restart. When input goes
+    // silent, the burst detector stops detecting bursts and confidence
+    // decays to 0 within ~1 second, triggering signal_lost.
 
     // 1. Verify signal is OK
     const before = await request.get("/api/v1/stats");
@@ -277,11 +277,10 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
     // 2. Mute loopback - NO monitoring restart
     await disconnectVasio8Loopback(vbmatrixHost);
 
-    // 3. Wait for signal_lost to be detected via periodic probe (up to 20s)
-    //    The monitoring loop probes the ASIO stream every ~10s to detect
-    //    routing changes that the ASIO driver doesn't report.
+    // 3. Wait for signal_lost to be detected (should happen within ~2s)
+    //    Confidence half-life is 0.3s, so drops below threshold in ~0.6s
     let signalLost = false;
-    for (let i = 0; i < 40; i++) {
+    for (let i = 0; i < 10; i++) {
       await new Promise((r) => setTimeout(r, 500));
       const resp = await request.get("/api/v1/stats");
       const stats = await resp.json();
@@ -297,31 +296,32 @@ test.describe("VBMatrix Loopback Signal Detection", () => {
   test("signal auto-recovers after loopback reconnect without manual restart", async ({
     request,
   }) => {
-    // This is the CRITICAL test: when VBMatrix routing changes,
-    // the app must auto-restart the ASIO stream to detect the change.
-    // The user should NOT need to manually restart monitoring.
+    // When VBMatrix routes are unmuted, the ASIO input starts receiving
+    // bursts again immediately. The burst detector picks them up and
+    // confidence is restored - NO monitoring restart needed.
 
-    // 1. Disconnect loopback + restart monitoring to establish lost state
+    // 1. Disconnect loopback - signal_lost should trigger via confidence decay
     await disconnectVasio8Loopback(vbmatrixHost);
-    await request.post("/api/v1/monitoring", { data: { enabled: false } });
-    await new Promise((r) => setTimeout(r, 1000));
-    await request.post("/api/v1/monitoring", { data: { enabled: true } });
-    await new Promise((r) => setTimeout(r, 3000));
 
-    // Verify signal is lost
-    const lostResp = await request.get("/api/v1/stats");
-    const lostStats = await lostResp.json();
-    expect(lostStats.signal_lost).toBe(true);
+    // Wait for signal_lost to be detected (confidence decays in ~1s)
+    let lostDetected = false;
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (stats.signal_lost) {
+        lostDetected = true;
+        break;
+      }
+    }
+    expect(lostDetected).toBe(true);
 
-    // 2. Reconnect loopback in VBMatrix - NO monitoring restart!
-    //    The app must auto-detect and recover.
+    // 2. Reconnect loopback - NO monitoring restart!
     await reconnectVasio8Loopback(vbmatrixHost);
 
-    // 3. Wait for auto-recovery (up to 30 seconds)
-    //    The monitoring loop should detect sustained signal_lost and
-    //    auto-restart the ASIO stream to pick up routing changes.
+    // 3. Wait for signal recovery (bursts resume immediately on unmute)
     let recovered = false;
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 10; i++) {
       await new Promise((r) => setTimeout(r, 500));
       const resp = await request.get("/api/v1/stats");
       const stats = await resp.json();
