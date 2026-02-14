@@ -1,11 +1,9 @@
-//! Burst signal generation for timestamp-based latency measurement
+//! Burst signal generation for frame-based latency measurement
 //!
 //! Generates a 10ms burst of white noise every 100ms, enabling precise
-//! latency measurement through burst detection and timestamp comparison.
-//! This approach is more accurate than MLS cross-correlation for real-time
-//! latency monitoring.
-
-use std::time::Instant;
+//! latency measurement through frame counter comparison.
+//! This approach measures latency via sample counting rather than wall-clock
+//! timestamps, eliminating ring buffer accumulation delays.
 
 /// Duration of silence before burst (90ms of 100ms cycle)
 const SILENCE_RATIO: f32 = 0.9;
@@ -13,13 +11,18 @@ const SILENCE_RATIO: f32 = 0.9;
 /// Burst amplitude (-6dB for headroom)
 const BURST_AMPLITUDE: f32 = 0.5;
 
-/// Event emitted when a burst starts
+/// Event emitted when a burst starts in the output callback
 #[derive(Debug, Clone)]
 pub struct BurstEvent {
-    /// Timestamp when burst generation started
-    pub start_time: Instant,
-    /// Frame counter at burst start
+    /// Output frame counter at burst start (the authoritative timing reference)
     pub start_frame: u64,
+}
+
+/// Event emitted when a burst is detected in the input callback
+#[derive(Debug, Clone)]
+pub struct DetectionEvent {
+    /// Input frame counter at burst detection
+    pub input_frame: u64,
 }
 
 /// Burst signal generator for latency measurement
