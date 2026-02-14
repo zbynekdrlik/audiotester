@@ -41,6 +41,9 @@ pub enum EngineCommand {
     Analyze {
         reply: oneshot::Sender<Option<AnalysisResult>>,
     },
+    GetSampleCounts {
+        reply: oneshot::Sender<(usize, usize)>,
+    },
 }
 
 /// Engine status snapshot (safe to send between threads)
@@ -91,6 +94,9 @@ impl EngineHandle {
                     }
                     EngineCommand::Analyze { reply } => {
                         let _ = reply.send(engine.analyze());
+                    }
+                    EngineCommand::GetSampleCounts { reply } => {
+                        let _ = reply.send(engine.sample_counts());
                     }
                 }
             }
@@ -156,6 +162,18 @@ impl EngineHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::Analyze { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
+    /// Get sample counts from the audio engine
+    ///
+    /// Returns (output_samples, input_samples) as cumulative counters
+    pub async fn get_sample_counts(&self) -> anyhow::Result<(usize, usize)> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetSampleCounts { reply })
             .await
             .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
         rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
