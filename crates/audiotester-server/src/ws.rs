@@ -71,17 +71,30 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
     // Subscribe to broadcast channel
     let mut rx = state.ws_tx.subscribe();
 
+    // Use oneshot for graceful shutdown instead of abort()
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
     // Spawn task to forward broadcast messages to this client
-    let mut send_task = tokio::spawn(async move {
-        while let Ok(msg) = rx.recv().await {
-            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
-                break;
+    let send_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    match result {
+                        Ok(msg) => {
+                            if ws_sender.send(Message::Text(msg.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = &mut shutdown_rx => break,
             }
         }
     });
 
     // Spawn task to handle incoming messages (pings, close)
-    let mut recv_task = tokio::spawn(async move {
+    let recv_task = tokio::spawn(async move {
         while let Some(Ok(msg)) = ws_receiver.next().await {
             if matches!(msg, Message::Close(_)) {
                 break;
@@ -91,12 +104,8 @@ async fn handle_ws(socket: WebSocket, state: AppState) {
 
     // Wait for either task to finish
     tokio::select! {
-        _ = &mut send_task => {
-            recv_task.abort();
-        }
-        _ = &mut recv_task => {
-            send_task.abort();
-        }
+        _ = send_task => {}
+        _ = recv_task => { let _ = shutdown_tx.send(()); }
     }
 
     tracing::debug!("WebSocket client disconnected");
