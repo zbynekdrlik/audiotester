@@ -54,6 +54,29 @@ test.describe("Signal Status Indicator", () => {
     const text = await signalEl.textContent();
     expect(text).toMatch(/Signal OK|NO SIGNAL/i);
   });
+
+  test("signal status reflects confidence from stats API", async ({
+    page,
+    request,
+  }) => {
+    // Get current stats to check signal_lost state
+    const statsResp = await request.get("/api/v1/stats");
+    expect(statsResp.ok()).toBeTruthy();
+    const stats = await statsResp.json();
+
+    // Wait for page to receive WebSocket update
+    await page.waitForTimeout(500);
+
+    // Verify dashboard shows correct state based on signal_lost
+    const signalEl = page.locator('[data-testid="signal-status"]');
+    const displayedText = await signalEl.textContent();
+
+    if (stats.signal_lost) {
+      expect(displayedText).toMatch(/NO SIGNAL/i);
+    } else {
+      expect(displayedText).toMatch(/Signal OK/i);
+    }
+  });
 });
 
 test.describe("Stats API includes signal_lost field", () => {

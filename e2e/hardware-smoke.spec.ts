@@ -81,4 +81,36 @@ test.describe("Hardware Smoke Tests", () => {
     // On a clean loopback, there should be zero or very few lost samples
     expect(body.total_lost).toBeLessThan(10);
   });
+
+  test("signal status shows OK when loopback is connected", async ({
+    page,
+    request,
+  }) => {
+    // On hardware with proper loopback, signal_lost should be false
+    const resp = await request.get("/api/v1/stats");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+
+    // With valid loopback, signal should be detected
+    expect(body.signal_lost).toBe(false);
+
+    // Dashboard should also show "Signal OK"
+    await page.goto("/");
+    const signalEl = page.locator('[data-testid="signal-status"]');
+    await expect(signalEl).toBeVisible({ timeout: 5_000 });
+    await expect(signalEl).toHaveText("Signal OK");
+  });
+
+  test("signal detection has sufficient confidence", async ({ request }) => {
+    // This test verifies that confidence threshold is correctly implemented
+    // A valid loopback should have high confidence
+    const resp = await request.get("/api/v1/stats");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+
+    // If we have measurements, signal_lost should be false with good loopback
+    if (body.measurement_count > 0) {
+      expect(body.signal_lost).toBe(false);
+    }
+  });
 });
