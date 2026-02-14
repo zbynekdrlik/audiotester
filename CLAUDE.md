@@ -38,31 +38,63 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 - Use `thiserror` for custom error types, `anyhow` for application errors
 - Prefer `tracing` over `println!` for logging
 
-## TDD Mandatory Process
+## TDD - STRICTLY MANDATORY (NO EXCEPTIONS)
 
-Every feature MUST follow this strict TDD workflow:
+**CRITICAL: The agent MUST write tests BEFORE writing ANY implementation code.**
 
-1. **Write failing tests FIRST** - Create the test file before any implementation
-2. **Run tests to verify they fail** - Tests must fail for the right reasons (compilation errors for missing types/functions are acceptable failures)
-3. **Implement minimal code** - Write only enough code to make tests pass
-4. **Refactor** - Clean up while keeping tests green
-5. **Never skip tests** - No `#[ignore]` without explicit approval
+This is not optional. Every bug fix, every feature, every change MUST have tests written FIRST.
 
-### Test File Naming Convention
+### TDD Workflow (MUST FOLLOW)
 
-| Test Type   | File Pattern             | Example                           |
-| ----------- | ------------------------ | --------------------------------- |
-| E2E         | `tests/e2e_*.rs`         | `tests/e2e_tray.rs`               |
-| Integration | `tests/integration/*.rs` | `tests/integration/audio_loop.rs` |
-| Unit        | Inside `mod tests`       | `#[cfg(test)] mod tests { ... }`  |
+1. **RED - Write failing tests FIRST**
+   - Create test file BEFORE touching implementation
+   - Tests MUST fail (compilation errors count as failures)
+   - Tests MUST cover the actual bug/feature being fixed
+   - Example: If tray icon doesn't change colors, write test that verifies color changes
+
+2. **GREEN - Implement minimal code**
+   - Write ONLY enough code to make tests pass
+   - Do NOT write "extra" code not covered by tests
+   - Run tests after EVERY change
+
+3. **REFACTOR - Clean up**
+   - Keep tests green while improving code
+   - Run full test suite before committing
+
+### Test Priority by Issue Type
+
+| Issue Type | Test Location    | Example                       |
+| ---------- | ---------------- | ----------------------------- |
+| UI Bug     | `tests/e2e_*.rs` | Tray icon color not changing  |
+| ASIO Error | `tests/e2e_*.rs` | Reconnection on buffer change |
+| API Bug    | `tests/e2e_*.rs` | Device info not showing       |
+| Logic Bug  | Unit tests       | Incorrect latency calculation |
+
+### What Tests MUST Verify
+
+- **Tray icon**: Test `status_from_analysis()` returns correct status for ALL conditions
+- **Reconnection**: Test that stats are preserved, backoff is correct
+- **Dashboard**: Test API returns correct data structure
+- **Loss detection**: Test immediate incrementing, not batched
 
 ### TDD Commit Pattern
 
 ```
-git commit -m "test: add e2e tests for feature X"   # RED phase
-git commit -m "feat: implement feature X"            # GREEN phase
-git commit -m "refactor: clean up feature X"         # REFACTOR phase
+git commit -m "test: add failing tests for feature X"  # RED - tests fail
+git commit -m "feat: implement feature X"               # GREEN - tests pass
+git commit -m "refactor: clean up feature X"            # REFACTOR
 ```
+
+### ENFORCEMENT
+
+The agent MUST NOT:
+
+- Write implementation code before tests
+- Skip tests because "it's a small change"
+- Write tests after implementation (this defeats the purpose)
+- Ignore failing tests
+
+If agent violates TDD, user should reject the PR and require proper TDD approach.
 
 ## Strict CI/CD Requirements
 

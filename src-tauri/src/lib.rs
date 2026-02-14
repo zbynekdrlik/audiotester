@@ -188,13 +188,49 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut consecutive_failures: u32 = 0;
     let mut reconnect_in_progress = false;
     let start_time = std::time::Instant::now();
+    let mut last_device_name: Option<String> = None;
+    let mut device_info_update_counter: u32 = 0;
+
+    // Wait for Tauri APP_HANDLE to be available (setup happens in parallel)
+    while APP_HANDLE.get().is_none() {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    tracing::info!("APP_HANDLE available, starting monitoring");
+
+    // Emit initial disconnected status so tray shows gray at startup
+    emit_tray_status(tray::TrayStatus::Disconnected, 0.0, 0);
 
     loop {
         interval.tick().await;
 
-        // Update uptime
-        if let Ok(mut store) = stats.lock() {
-            store.set_uptime(start_time.elapsed().as_secs());
+        // Update uptime and device info periodically (every 10 cycles = 1 second)
+        device_info_update_counter += 1;
+        if device_info_update_counter >= 10 {
+            device_info_update_counter = 0;
+
+            // Get engine status and cache in stats store
+            if let Ok(engine_status) = engine.get_status().await {
+                if let Ok(mut store) = stats.lock() {
+                    store.set_uptime(start_time.elapsed().as_secs());
+                    store.set_device_info(
+                        engine_status.device_name.clone(),
+                        engine_status.sample_rate,
+                        0, // Buffer size not exposed by cpal yet
+                    );
+                }
+
+                // Track if device changed (for reconnection)
+                if engine_status.device_name != last_device_name {
+                    if last_device_name.is_some() {
+                        tracing::info!(
+                            old = ?last_device_name,
+                            new = ?engine_status.device_name,
+                            "Device changed"
+                        );
+                    }
+                    last_device_name = engine_status.device_name;
+                }
+            }
         }
 
         // Try to analyze
@@ -241,10 +277,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 if new_status != last_status {
                     last_status = new_status;
                     emit_tray_status(new_status, result.latency_ms, result.lost_samples as u64);
+                    tracing::debug!(status = ?new_status, "Tray status changed");
                 }
             }
             Ok(None) => {
                 // No result yet (engine might be stopped or warming up)
+                // Still broadcast stats so dashboard updates
+                audiotester_server::ws::broadcast_stats(&state);
             }
             Err(e) => {
                 // Engine error - attempt reconnection
@@ -269,6 +308,23 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
                     // Wait with exponential backoff before next attempt
                     tokio::time::sleep(Duration::from_millis(backoff)).await;
+
+                    // FULL reconnection: stop, re-select device, start
+                    // This handles buffer size changes in ASIO driver
+                    if let Err(stop_err) = engine.stop().await {
+                        tracing::debug!(error = %stop_err, "Stop during reconnect (may be expected)");
+                    }
+
+                    // Re-select the same device to reinitialize ASIO
+                    if let Some(ref device) = last_device_name {
+                        if let Err(select_err) = engine.select_device(device.clone()).await {
+                            tracing::warn!(
+                                device = %device,
+                                error = %select_err,
+                                "Failed to re-select device during reconnect"
+                            );
+                        }
+                    }
 
                     // Try to restart the engine
                     match engine.start().await {
@@ -317,8 +373,12 @@ fn emit_tray_status(status: tray::TrayStatus, latency_ms: f64, lost_samples: u64
             lost_samples,
         };
 
+        tracing::debug!(status = ?status, "Emitting tray status event");
+
         if let Err(e) = app.emit("tray-status", event) {
             tracing::warn!("Failed to emit tray status event: {}", e);
         }
+    } else {
+        tracing::trace!("APP_HANDLE not yet available, skipping tray emit");
     }
 }

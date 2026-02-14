@@ -48,12 +48,20 @@ fn DashboardPage() -> impl IntoView {
                             <span class="info-value" id="device-name">"--"</span>
                         </div>
                         <div class="info-item">
-                            <span class="info-label">"Sample Rate:"</span>
+                            <span class="info-label">"Rate:"</span>
                             <span class="info-value" id="sample-rate-display">"--"</span>
                         </div>
                         <div class="info-item">
                             <span class="info-label">"Uptime:"</span>
                             <span class="info-value" id="uptime-display">"--"</span>
+                        </div>
+                        <div class="info-item samples-counter">
+                            <span class="info-label">"OUT:"</span>
+                            <span class="info-value" id="samples-sent">"0"</span>
+                        </div>
+                        <div class="info-item samples-counter">
+                            <span class="info-label">"IN:"</span>
+                            <span class="info-value" id="samples-received">"0"</span>
                         </div>
                         <button class="btn-reset" id="reset-btn" title="Reset counters (preserves graph history)">"Reset"</button>
                     </div>

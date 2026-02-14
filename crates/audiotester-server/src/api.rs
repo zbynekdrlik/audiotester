@@ -41,6 +41,10 @@ pub struct StatsResponse {
     pub uptime_seconds: u64,
     /// Loss events with timestamps for visualization
     pub loss_events: Vec<LossEventResponse>,
+    /// Total samples sent since reset
+    pub samples_sent: u64,
+    /// Total samples received since reset
+    pub samples_received: u64,
 }
 
 /// Loss event response for API
@@ -151,10 +155,12 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
         latency_history,
         loss_history,
         device_name,
-        buffer_size: 0, // ASIO buffer size not yet exposed from cpal
+        buffer_size: stats.buffer_size,
         sample_rate,
         uptime_seconds: stats.uptime_seconds,
         loss_events,
+        samples_sent: stats.samples_sent,
+        samples_received: stats.samples_received,
     })
 }
 
@@ -347,11 +353,15 @@ mod tests {
             sample_rate: 96000,
             uptime_seconds: 3600,
             loss_events: vec![],
+            samples_sent: 1000000,
+            samples_received: 999950,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"current_latency\":5.0"));
         assert!(json.contains("\"device_name\":\"Test ASIO\""));
         assert!(json.contains("\"sample_rate\":96000"));
+        assert!(json.contains("\"samples_sent\":1000000"));
+        assert!(json.contains("\"samples_received\":999950"));
     }
 
     #[test]

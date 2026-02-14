@@ -18,6 +18,8 @@
   const deviceNameEl = document.getElementById("device-name");
   const sampleRateEl = document.getElementById("sample-rate-display");
   const uptimeEl = document.getElementById("uptime-display");
+  const samplesSentEl = document.getElementById("samples-sent");
+  const samplesReceivedEl = document.getElementById("samples-received");
   const resetBtn = document.getElementById("reset-btn");
 
   // Chart data
@@ -126,16 +128,31 @@
       els.corrupted.textContent = stats.total_corrupted.toString();
 
     // Update device info
-    if (deviceNameEl && stats.device_name) {
-      deviceNameEl.textContent = stats.device_name;
+    if (deviceNameEl) {
+      deviceNameEl.textContent = stats.device_name || "--";
     }
-    if (sampleRateEl && stats.sample_rate) {
+    if (sampleRateEl) {
       sampleRateEl.textContent =
-        stats.sample_rate > 0 ? stats.sample_rate + " Hz" : "--";
+        stats.sample_rate > 0 ? stats.sample_rate / 1000 + " kHz" : "--";
     }
     if (uptimeEl && stats.uptime_seconds !== undefined) {
       uptimeEl.textContent = formatUptime(stats.uptime_seconds);
     }
+    // Update sample counters
+    if (samplesSentEl && stats.samples_sent !== undefined) {
+      samplesSentEl.textContent = formatSampleCount(stats.samples_sent);
+    }
+    if (samplesReceivedEl && stats.samples_received !== undefined) {
+      samplesReceivedEl.textContent = formatSampleCount(stats.samples_received);
+    }
+  }
+
+  // Format large sample counts (e.g., 1.2M, 450K)
+  function formatSampleCount(count) {
+    if (count >= 1000000000) return (count / 1000000000).toFixed(1) + "G";
+    if (count >= 1000000) return (count / 1000000).toFixed(1) + "M";
+    if (count >= 1000) return (count / 1000).toFixed(1) + "K";
+    return count.toString();
   }
 
   function updateCharts(stats) {
