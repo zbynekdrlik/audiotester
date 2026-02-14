@@ -176,6 +176,22 @@ fn calculate_backoff_ms(attempt: u32) -> u64 {
 /// Maximum number of reconnection attempts before requiring manual intervention
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// Interval between periodic ASIO stream probes (seconds).
+///
+/// VBMatrix routing changes (mute/unmute) don't affect a running ASIO stream -
+/// the driver keeps delivering the same buffer data regardless of mute state.
+/// The stream MUST be restarted for routing changes to take effect.
+///
+/// This probe periodically restarts the ASIO stream to detect routing changes:
+/// - Signal OK → probe → route was muted → signal_lost detected
+/// - Signal lost → probe → route was unmuted → signal recovered
+const ASIO_PROBE_INTERVAL_SECS: u64 = 10;
+
+/// Grace period (seconds) after a probe restart before checking signal timeout.
+/// After restarting, the engine needs time to fill buffers and produce the
+/// first analysis result (~0.5s at 96kHz).
+const PROBE_GRACE_SECS: u64 = 3;
+
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
 /// Includes auto-reconnection with exponential backoff. When the audio engine
@@ -192,8 +208,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut device_info_update_counter: u32 = 0;
     let mut last_successful_analysis: Option<std::time::Instant> = None;
     let mut signal_lost = false;
-    let mut signal_lost_since: Option<std::time::Instant> = None;
-    let mut signal_recovery_attempts: u32 = 0;
+    let mut last_signal_probe: Option<std::time::Instant> = None;
 
     // Wait for Tauri APP_HANDLE to be available (setup happens in parallel)
     while APP_HANDLE.get().is_none() {
@@ -263,8 +278,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     // Reset signal_lost if it was set
                     if signal_lost {
                         signal_lost = false;
-                        signal_lost_since = None;
-                        signal_recovery_attempts = 0;
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
@@ -277,7 +290,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 } else if !signal_lost {
                     // Invalid signal - set signal_lost immediately
                     signal_lost = true;
-                    signal_lost_since = Some(std::time::Instant::now());
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(true);
                     }
@@ -336,16 +348,22 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             Ok(None) => {
                 // No result yet (engine might be stopped or warming up)
                 // Check for signal timeout (1 second without analysis result while engine running)
-                if let Ok(status) = engine.get_status().await {
-                    if status.state == audiotester_core::audio::engine::EngineState::Running {
-                        if let Some(last) = last_successful_analysis {
-                            if last.elapsed() > Duration::from_secs(1) && !signal_lost {
-                                signal_lost = true;
-                                signal_lost_since = Some(std::time::Instant::now());
-                                if let Ok(mut store) = stats.lock() {
-                                    store.set_signal_lost(true);
+                // Skip timeout check during probe grace period (engine just restarted)
+                let in_probe_grace = last_signal_probe
+                    .map(|t| t.elapsed() < Duration::from_secs(PROBE_GRACE_SECS))
+                    .unwrap_or(false);
+
+                if !in_probe_grace {
+                    if let Ok(status) = engine.get_status().await {
+                        if status.state == audiotester_core::audio::engine::EngineState::Running {
+                            if let Some(last) = last_successful_analysis {
+                                if last.elapsed() > Duration::from_secs(1) && !signal_lost {
+                                    signal_lost = true;
+                                    if let Ok(mut store) = stats.lock() {
+                                        store.set_signal_lost(true);
+                                    }
+                                    tracing::warn!("No signal detected (analysis timeout)");
                                 }
-                                tracing::warn!("No signal detected (analysis timeout)");
                             }
                         }
                     }
@@ -425,50 +443,59 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             }
         }
 
-        // Auto-recovery: restart ASIO stream after sustained signal loss.
-        // VBMatrix routing changes (mute/unmute) don't affect a running ASIO
-        // stream. Simple stop + wait + start (NO device re-select) picks up
-        // routing changes. Re-selecting the device would try to open a new
-        // ASIO handle while the old one isn't fully released, causing failure.
-        if signal_lost && !reconnect_in_progress {
-            if let Some(lost_at) = signal_lost_since {
-                let lost_duration = lost_at.elapsed();
-                // First attempt after 5s, then every 15s, up to 5 attempts
-                let next_attempt_at =
-                    Duration::from_secs(5) + Duration::from_secs(15) * signal_recovery_attempts;
-                if lost_duration >= next_attempt_at
-                    && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
-                {
-                    signal_recovery_attempts += 1;
-                    tracing::info!(
-                        attempt = signal_recovery_attempts,
-                        lost_secs = lost_duration.as_secs(),
-                        "Signal lost - restarting ASIO stream for auto-recovery"
-                    );
+        // Periodic ASIO stream probe to detect VBMatrix routing changes.
+        //
+        // PROVEN BY EXPERIMENT: VBMatrix .Mute does NOT stop audio at the ASIO
+        // driver level. A running ASIO stream continues to pass the loopback
+        // signal with ~0.95 confidence even when VBMatrix shows the route as
+        // muted. The stream MUST be restarted for mute/unmute to take effect.
+        //
+        // This probe restarts the ASIO stream every ASIO_PROBE_INTERVAL_SECS:
+        // - When signal is OK: detects if route was muted (signal disappears)
+        // - When signal is lost: detects if route was unmuted (signal returns)
+        //
+        // NO device re-select is performed - just stop + wait + start.
+        // Re-selecting would try to open a new ASIO handle while the old one
+        // isn't fully released, causing "device no longer available" errors.
+        if !reconnect_in_progress {
+            let should_probe = match last_signal_probe {
+                None => {
+                    // First probe only after stable analysis for a while
+                    last_successful_analysis
+                        .map(|t| t.elapsed() >= Duration::from_secs(5))
+                        .unwrap_or(false)
+                }
+                Some(last_probe) => {
+                    last_probe.elapsed() >= Duration::from_secs(ASIO_PROBE_INTERVAL_SECS)
+                }
+            };
 
-                    // Stop the engine (releases ASIO streams)
-                    if let Err(e) = engine.stop().await {
-                        tracing::debug!(error = %e, "Stop during signal recovery");
-                    }
+            if should_probe {
+                if let Ok(status) = engine.get_status().await {
+                    if status.state == audiotester_core::audio::engine::EngineState::Running {
+                        last_signal_probe = Some(std::time::Instant::now());
+                        tracing::debug!(
+                            signal_lost,
+                            "Periodic ASIO probe: restarting stream to check routing"
+                        );
 
-                    // Wait for ASIO driver to release streams
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-
-                    // Start the engine (device is already selected, just
-                    // creates new streams - same as manual monitoring restart)
-                    match engine.start().await {
-                        Ok(()) => {
-                            tracing::info!(
-                                attempt = signal_recovery_attempts,
-                                "ASIO stream restarted for signal recovery"
-                            );
+                        if let Err(e) = engine.stop().await {
+                            tracing::debug!(error = %e, "Stop during ASIO probe");
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                attempt = signal_recovery_attempts,
-                                error = %e,
-                                "Failed to restart ASIO stream for signal recovery"
-                            );
+
+                        // Wait for ASIO driver to fully release streams
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+
+                        match engine.start().await {
+                            Ok(()) => {
+                                tracing::debug!("ASIO probe: stream restarted successfully");
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    error = %e,
+                                    "ASIO probe: failed to restart stream"
+                                );
+                            }
                         }
                     }
                 }
