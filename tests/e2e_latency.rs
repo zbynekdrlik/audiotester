@@ -1,13 +1,22 @@
 //! E2E tests for latency measurement
 //!
-//! Tests both the new burst-based latency detection system and
+//! Tests both the new frame-based burst latency detection system and
 //! legacy MLS cross-correlation for backward compatibility.
+//!
+//! ## Frame-Based Latency Measurement
+//!
+//! The new system uses sample frame counters instead of wall-clock timestamps:
+//! - Output callback generates burst at output_frame N
+//! - Input callback detects burst at input_frame M
+//! - Latency = (M - N) / sample_rate
+//!
+//! This eliminates the ~500ms artificial delay from ring buffer accumulation.
 
-use audiotester::audio::burst::BurstGenerator;
+use audiotester::audio::burst::{BurstEvent, BurstGenerator, DetectionEvent};
 use audiotester::audio::detector::BurstDetector;
 use audiotester::audio::latency::LatencyAnalyzer;
 use audiotester::audio::{analyzer::Analyzer, signal::MlsGenerator};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 // ============================================================================
 // BURST-BASED LATENCY TESTS (Primary System)
@@ -57,51 +66,41 @@ fn test_burst_detection() {
     assert!(detected, "Burst should be detected within 100 samples");
 }
 
-/// Test latency calculation with simulated delay
+/// Test frame-based latency calculation
 #[test]
 fn test_burst_latency_calculation() {
-    let mut gen = BurstGenerator::new(48000);
+    let gen = BurstGenerator::new(48000);
     let mut analyzer = LatencyAnalyzer::new(48000);
 
-    // Generate one cycle of burst signal
-    let mut output_buffer = vec![0.0f32; gen.cycle_length()];
-    let burst_starts = gen.fill_buffer(&mut output_buffer);
-
-    assert_eq!(
-        burst_starts.len(),
-        1,
-        "Should have exactly one burst per cycle"
-    );
-
-    // Register burst event at start of burst
-    let burst_time = Instant::now();
-    let event = audiotester::audio::burst::BurstEvent {
-        start_time: burst_time,
-        start_frame: burst_starts[0] as u64,
+    // Burst starts at frame 1000
+    let output_frame = 1000u64;
+    let event = BurstEvent {
+        start_frame: output_frame,
     };
     analyzer.register_burst(event);
 
-    // Simulate 5ms delay
-    std::thread::sleep(Duration::from_millis(5));
+    // Simulate 5ms latency: 5ms * 48000 = 240 samples
+    let input_frame = output_frame + 240;
+    let detection = DetectionEvent { input_frame };
 
-    // Create input buffer (just the burst portion, starting at detection point)
-    let burst_start = gen.burst_start_position();
-    let input_buffer = output_buffer[burst_start..].to_vec();
+    let result = analyzer.match_detection(&detection);
 
-    let callback_time = Instant::now();
-    let result = analyzer.analyze(&input_buffer, callback_time);
-
-    assert!(
-        result.is_some(),
-        "Should detect burst and calculate latency"
-    );
+    assert!(result.is_some(), "Should match burst and calculate latency");
     let result = result.unwrap();
 
-    // Latency should be approximately 5ms (with some jitter tolerance)
+    // Latency should be exactly 5ms (frame-based is precise)
+    assert_eq!(result.latency_samples, 240);
     assert!(
-        result.latency_ms > 2.0 && result.latency_ms < 20.0,
-        "Latency should be approximately 5ms, got {}ms",
+        (result.latency_ms - 5.0).abs() < 0.1,
+        "Latency should be 5ms, got {}ms",
         result.latency_ms
+    );
+
+    // Test burst generator cycle length for reference
+    assert_eq!(
+        gen.cycle_length(),
+        4800,
+        "100ms at 48kHz should be 4800 samples"
     );
 }
 
@@ -395,6 +394,209 @@ fn test_continuous_monitoring_mls() {
             result.latency_samples, delay,
             "Iteration {}: latency should be consistent",
             iteration
+        );
+    }
+}
+
+// ============================================================================
+// HARDWARE E2E TESTS (Real ASIO Hardware on iem.lan)
+// ============================================================================
+//
+// These tests verify that the latency measurement system works correctly
+// with real ASIO hardware. They call the actual deployed API on iem.lan.
+//
+// IMPORTANT: These tests require:
+// - audiotester deployed and running on iem.lan
+// - VASIO-8 loopback configured
+// - Network access to http://iem.lan:8920
+//
+// Run with: cargo test --test e2e_latency -- --ignored --test-threads=1
+
+/// Test latency on iem.lan matches expected hardware performance
+///
+/// This test calls the actual deployed service on real ASIO hardware.
+/// Ableton shows ~4ms on the same VASIO-8 loopback path, so we expect
+/// our measurement to be under 10ms (allowing for measurement overhead).
+#[test]
+#[ignore = "requires iem.lan deployment"]
+fn test_iem_lan_latency_under_10ms() {
+    // Call the actual deployed API
+    let response = reqwest::blocking::get("http://iem.lan:8920/api/v1/stats")
+        .expect("iem.lan not reachable - is audiotester deployed?");
+
+    assert!(
+        response.status().is_success(),
+        "API returned error: {}",
+        response.status()
+    );
+
+    let stats: serde_json::Value = response.json().expect("Invalid JSON response");
+
+    let latency_ms = stats["current_latency_ms"]
+        .as_f64()
+        .expect("Missing current_latency_ms in response");
+
+    // CRITICAL: This is the acceptance criteria
+    // Ableton shows ~4ms, so we should be under 10ms
+    assert!(
+        latency_ms < 10.0,
+        "Latency {}ms exceeds 10ms threshold. \
+         Ableton shows ~4ms on same VASIO-8 loopback. \
+         The measurement implementation may be broken.",
+        latency_ms
+    );
+
+    // Also verify latency is positive and reasonable
+    assert!(
+        latency_ms > 0.1,
+        "Latency {}ms is suspiciously low - measurement may not be working",
+        latency_ms
+    );
+
+    println!("✓ Measured latency: {:.2}ms (threshold: <10ms)", latency_ms);
+}
+
+/// Test that latency is stable (not cycling) on iem.lan
+///
+/// Takes 10 measurements over 2 seconds and verifies the standard deviation
+/// is under 2ms. High variance indicates cycling or jitter issues.
+#[test]
+#[ignore = "requires iem.lan deployment"]
+fn test_iem_lan_latency_stable() {
+    let mut measurements = Vec::new();
+
+    // Take 10 measurements over 2 seconds
+    for i in 0..10 {
+        let response = reqwest::blocking::get("http://iem.lan:8920/api/v1/stats")
+            .unwrap_or_else(|_| panic!("iem.lan not reachable on measurement {}", i));
+
+        let stats: serde_json::Value = response.json().unwrap();
+        if let Some(latency) = stats["current_latency_ms"].as_f64() {
+            measurements.push(latency);
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    assert!(
+        measurements.len() >= 5,
+        "Not enough measurements collected: {}",
+        measurements.len()
+    );
+
+    // Calculate variance
+    let mean = measurements.iter().sum::<f64>() / measurements.len() as f64;
+    let variance =
+        measurements.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / measurements.len() as f64;
+    let std_dev = variance.sqrt();
+
+    // Latency should be stable within 2ms
+    assert!(
+        std_dev < 2.0,
+        "Latency unstable: std_dev {:.2}ms, measurements: {:?}. \
+         This indicates cycling or jitter issues.",
+        std_dev,
+        measurements
+    );
+
+    println!(
+        "✓ Latency stable: mean={:.2}ms, std_dev={:.2}ms",
+        mean, std_dev
+    );
+}
+
+/// Test no false sample loss on healthy loopback
+///
+/// On a healthy VASIO-8 loopback, there should be zero sample loss.
+/// False positives indicate bugs in the measurement system.
+#[test]
+#[ignore = "requires iem.lan deployment"]
+fn test_iem_lan_no_false_loss() {
+    let response =
+        reqwest::blocking::get("http://iem.lan:8920/api/v1/stats").expect("iem.lan not reachable");
+
+    let stats: serde_json::Value = response.json().expect("Invalid JSON response");
+
+    let lost = stats["total_lost"].as_u64().unwrap_or(0);
+
+    assert_eq!(
+        lost, 0,
+        "Detected {} lost samples on healthy loopback. \
+         This is likely a false positive from measurement bugs.",
+        lost
+    );
+
+    println!("✓ No sample loss detected (expected: 0)");
+}
+
+// ============================================================================
+// FRAME-BASED LATENCY UNIT TESTS
+// ============================================================================
+
+/// Test frame-based latency at various sample rates
+#[test]
+fn test_frame_latency_various_sample_rates() {
+    let sample_rates = [44100u32, 48000, 96000, 192000];
+    let target_latency_ms = 4.0; // Target 4ms like Ableton
+
+    for &sr in &sample_rates {
+        let mut analyzer = LatencyAnalyzer::new(sr);
+
+        // Register burst at frame 10000
+        let output_frame = 10000u64;
+        analyzer.register_burst(BurstEvent {
+            start_frame: output_frame,
+        });
+
+        // Calculate input frame for target latency
+        let latency_samples = ((target_latency_ms / 1000.0) * sr as f64).round() as u64;
+        let input_frame = output_frame + latency_samples;
+
+        let result = analyzer
+            .match_detection(&DetectionEvent { input_frame })
+            .expect("Should match");
+
+        assert!(
+            (result.latency_ms - target_latency_ms).abs() < 0.5,
+            "At {}Hz, {}ms latency should be detected (got {:.2}ms)",
+            sr,
+            target_latency_ms,
+            result.latency_ms
+        );
+    }
+}
+
+/// Test that frame-based measurement handles multiple bursts correctly
+#[test]
+fn test_frame_latency_multiple_bursts() {
+    let mut analyzer = LatencyAnalyzer::new(48000);
+
+    // Register multiple bursts
+    for i in 0..5 {
+        let output_frame = i * 4800; // One burst every 100ms
+        analyzer.register_burst(BurstEvent {
+            start_frame: output_frame,
+        });
+    }
+
+    // Match detections with consistent 3ms latency (144 samples at 48kHz)
+    for i in 0..5 {
+        let output_frame = i * 4800;
+        let input_frame = output_frame + 144;
+
+        let result = analyzer
+            .match_detection(&DetectionEvent { input_frame })
+            .expect("Should match burst");
+
+        assert_eq!(
+            result.latency_samples, 144,
+            "Burst {} should have 144 sample latency",
+            i
+        );
+        assert!(
+            (result.latency_ms - 3.0).abs() < 0.1,
+            "Burst {} should have ~3ms latency, got {:.2}ms",
+            i,
+            result.latency_ms
         );
     }
 }

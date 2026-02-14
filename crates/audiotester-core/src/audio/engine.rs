@@ -7,24 +7,25 @@
 //!
 //! ## Latency Measurement
 //!
-//! Uses timestamp-based burst detection for accurate latency measurement:
+//! Uses frame-based burst detection for accurate latency measurement:
 //! - Channel 0: 10ms burst every 100ms (10Hz update rate)
 //! - Channel 1: Frame counter (sawtooth 0.0-1.0) for loss detection
 //!
-//! Latency is calculated by comparing burst generation timestamps with
-//! detection timestamps, providing sub-millisecond accuracy.
+//! Latency is calculated using sample frame counters shared between
+//! input and output callbacks, providing sample-accurate timing.
+//! This eliminates the artificial delays caused by ring buffer accumulation.
 
 use crate::audio::analyzer::Analyzer;
-use crate::audio::burst::{BurstEvent, BurstGenerator};
+use crate::audio::burst::{BurstEvent, BurstGenerator, DetectionEvent};
+use crate::audio::detector::BurstDetector;
 use crate::audio::latency::{LatencyAnalyzer, LatencyResult};
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use thiserror::Error;
 
 /// Ring buffer size in samples (enough for ~0.5 second at 96kHz)
@@ -117,7 +118,7 @@ impl From<LatencyResult> for AnalysisResult {
 struct SharedState {
     /// Burst generator for output
     burst_gen: Mutex<BurstGenerator>,
-    /// Latency analyzer for timestamp-based measurement
+    /// Latency analyzer for frame-based measurement
     latency_analyzer: Mutex<LatencyAnalyzer>,
     /// Frame-based loss detector (for counter channel)
     frame_analyzer: Mutex<Analyzer>,
@@ -129,15 +130,12 @@ struct SharedState {
     output_samples: std::sync::atomic::AtomicUsize,
     /// Counter for input samples (debug)
     input_samples: std::sync::atomic::AtomicUsize,
-    /// Global frame counter for output (used for loss detection)
-    output_frame_counter: std::sync::atomic::AtomicU64,
-}
-
-/// Callback timestamp for latency calculation
-#[derive(Debug, Clone)]
-struct CallbackTimestamp {
-    /// When the callback was invoked
-    time: Instant,
+    /// Global frame counter for output (used for loss detection and latency)
+    output_frame_counter: AtomicU64,
+    /// Global frame counter for input (used for latency measurement)
+    input_frame_counter: AtomicU64,
+    /// Burst detector for inline detection in input callback
+    burst_detector: Mutex<BurstDetector>,
 }
 
 /// ASIO audio engine for managing audio streams
@@ -150,14 +148,12 @@ pub struct AudioEngine {
     input_stream: Option<Stream>,
     output_stream: Option<Stream>,
     shared_state: Option<Arc<SharedState>>,
-    /// Consumer for input samples (burst channel for latency analysis)
-    input_consumer: Option<ringbuf::HeapCons<f32>>,
     /// Consumer for counter samples (frame counter channel for loss detection)
     counter_consumer: Option<ringbuf::HeapCons<f32>>,
     /// Receiver for burst events from output callback
     burst_event_rx: Option<std::sync::mpsc::Receiver<BurstEvent>>,
-    /// Receiver for callback timestamps from input callback
-    callback_time_rx: Option<std::sync::mpsc::Receiver<CallbackTimestamp>>,
+    /// Receiver for detection events from input callback
+    detection_event_rx: Option<std::sync::mpsc::Receiver<DetectionEvent>>,
 }
 
 impl AudioEngine {
@@ -172,10 +168,9 @@ impl AudioEngine {
             input_stream: None,
             output_stream: None,
             shared_state: None,
-            input_consumer: None,
             counter_consumer: None,
             burst_event_rx: None,
-            callback_time_rx: None,
+            detection_event_rx: None,
         }
     }
 
@@ -400,22 +395,19 @@ impl AudioEngine {
         input_config.sample_rate = SampleRate(effective_rate);
         tracing::info!("Effective sample rate: {} Hz", effective_rate);
 
-        // Create ring buffers for input samples
-        // Burst ring buffer: ch0 samples for latency analysis
-        let burst_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
-        let (burst_producer, burst_consumer) = burst_ring.split();
-
-        // Counter ring buffer: ch1 samples for loss detection
+        // Counter ring buffer: ch1 samples for loss detection only
+        // NOTE: Burst samples are NOT buffered - detection happens inline in callback
         let counter_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
         let (counter_producer, counter_consumer) = counter_ring.split();
 
-        // Create channels for burst events and callback timestamps
+        // Create channels for burst events (from output) and detection events (from input)
         let (burst_event_tx, burst_event_rx) = std::sync::mpsc::channel::<BurstEvent>();
-        let (callback_time_tx, callback_time_rx) = std::sync::mpsc::channel::<CallbackTimestamp>();
+        let (detection_event_tx, detection_event_rx) = std::sync::mpsc::channel::<DetectionEvent>();
 
-        // Create shared state with burst-based components
+        // Create shared state with frame-based components
         let burst_gen = BurstGenerator::new(effective_rate);
         let latency_analyzer = LatencyAnalyzer::new(effective_rate);
+        let burst_detector = BurstDetector::new(effective_rate);
 
         // Frame analyzer for loss detection (uses empty reference - we only use detect_frame_loss)
         let frame_analyzer = Analyzer::new(&[], effective_rate);
@@ -428,7 +420,9 @@ impl AudioEngine {
             running: AtomicBool::new(true),
             output_samples: std::sync::atomic::AtomicUsize::new(0),
             input_samples: std::sync::atomic::AtomicUsize::new(0),
-            output_frame_counter: std::sync::atomic::AtomicU64::new(0),
+            output_frame_counter: AtomicU64::new(0),
+            input_frame_counter: AtomicU64::new(0),
+            burst_detector: Mutex::new(burst_detector),
         });
 
         // Create output stream with multi-channel support
@@ -455,10 +449,9 @@ impl AudioEngine {
                                 frame[0] = sample;
                             }
 
-                            // Capture burst start timestamp
+                            // Capture burst start frame (frame-based timing)
                             if is_burst_start {
                                 let event = BurstEvent {
-                                    start_time: Instant::now(),
                                     start_frame: start_counter + i as u64,
                                 };
                                 let _ = burst_event_tx.send(event);
@@ -506,8 +499,8 @@ impl AudioEngine {
             None,
         )?;
 
-        // Create input stream with dual-channel extraction
-        let burst_input_producer = Arc::new(Mutex::new(burst_producer));
+        // Create input stream with inline burst detection
+        // NOTE: Burst detection happens INSIDE the callback, not later via ring buffer
         let counter_input_producer = Arc::new(Mutex::new(counter_producer));
         let input_state = Arc::clone(&shared_state);
         let num_input_channels = input_channels as usize;
@@ -516,52 +509,67 @@ impl AudioEngine {
             &input_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_state.running.load(Ordering::Relaxed) {
-                    // Capture callback timestamp
-                    let callback_time = Instant::now();
                     let frame_count = data.len() / num_input_channels;
 
-                    let burst_lock = burst_input_producer.lock();
-                    let counter_lock = counter_input_producer.lock();
+                    // Get starting input frame counter
+                    let input_frame_start =
+                        input_state.input_frame_counter.load(Ordering::Relaxed);
 
-                    if let (Ok(mut burst_prod), Ok(mut cnt_prod)) = (burst_lock, counter_lock) {
-                        for frame in data.chunks(num_input_channels) {
-                            // Extract ch0 (burst signal)
+                    // Inline burst detection - NO ring buffer delay!
+                    // This is the critical fix: detect burst immediately with exact frame number
+                    if let Ok(mut detector) = input_state.burst_detector.lock() {
+                        for (i, frame) in data.chunks(num_input_channels).enumerate() {
                             if !frame.is_empty() {
-                                let _ = burst_prod.try_push(frame[0]);
+                                let sample = frame[0];
+                                let current_frame = input_frame_start + i as u64;
+
+                                // Detect burst IMMEDIATELY with associated frame number
+                                if detector.process(sample, i).is_some() {
+                                    // Burst detected at input frame 'current_frame'
+                                    let detection = DetectionEvent {
+                                        input_frame: current_frame,
+                                    };
+                                    let _ = detection_event_tx.send(detection);
+                                }
                             }
-                            // Extract ch1 (counter) if available
+                        }
+                    }
+
+                    // Counter ring buffer for loss detection (channel 1)
+                    if let Ok(mut cnt_prod) = counter_input_producer.lock() {
+                        for frame in data.chunks(num_input_channels) {
                             if frame.len() > 1 {
                                 let _ = cnt_prod.try_push(frame[1]);
                             }
                         }
+                    }
 
-                        // Send callback timestamp
-                        let _ = callback_time_tx.send(CallbackTimestamp {
-                            time: callback_time,
-                        });
+                    // Update input frame counter
+                    input_state
+                        .input_frame_counter
+                        .fetch_add(frame_count as u64, Ordering::Relaxed);
 
-                        let prev = input_state
-                            .input_samples
-                            .fetch_add(frame_count, Ordering::Relaxed);
-                        if prev == 0 {
-                            let max_level_ch0 = data
-                                .chunks(num_input_channels)
-                                .filter_map(|f| f.first())
-                                .map(|x| x.abs())
-                                .fold(0.0f32, f32::max);
-                            let max_level_ch1 = data
-                                .chunks(num_input_channels)
-                                .filter_map(|f| f.get(1))
-                                .map(|x| x.abs())
-                                .fold(0.0f32, f32::max);
-                            tracing::info!(
-                                "Input callback started: {} frames ({} channels), ch0 max: {:.4}, ch1 max: {:.4}",
-                                frame_count,
-                                num_input_channels,
-                                max_level_ch0,
-                                max_level_ch1
-                            );
-                        }
+                    let prev = input_state
+                        .input_samples
+                        .fetch_add(frame_count, Ordering::Relaxed);
+                    if prev == 0 {
+                        let max_level_ch0 = data
+                            .chunks(num_input_channels)
+                            .filter_map(|f| f.first())
+                            .map(|x| x.abs())
+                            .fold(0.0f32, f32::max);
+                        let max_level_ch1 = data
+                            .chunks(num_input_channels)
+                            .filter_map(|f| f.get(1))
+                            .map(|x| x.abs())
+                            .fold(0.0f32, f32::max);
+                        tracing::info!(
+                            "Input callback started: {} frames ({} channels), ch0 max: {:.4}, ch1 max: {:.4}",
+                            frame_count,
+                            num_input_channels,
+                            max_level_ch0,
+                            max_level_ch1
+                        );
                     }
                 }
             },
@@ -579,10 +587,9 @@ impl AudioEngine {
         self.output_stream = Some(output_stream);
         self.input_stream = Some(input_stream);
         self.shared_state = Some(shared_state);
-        self.input_consumer = Some(burst_consumer);
         self.counter_consumer = Some(counter_consumer);
         self.burst_event_rx = Some(burst_event_rx);
-        self.callback_time_rx = Some(callback_time_rx);
+        self.detection_event_rx = Some(detection_event_rx);
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
 
@@ -604,10 +611,9 @@ impl AudioEngine {
         self.input_stream = None;
         self.output_stream = None;
         self.shared_state = None;
-        self.input_consumer = None;
         self.counter_consumer = None;
         self.burst_event_rx = None;
-        self.callback_time_rx = None;
+        self.detection_event_rx = None;
 
         self.state = EngineState::Stopped;
 
@@ -616,65 +622,47 @@ impl AudioEngine {
         Ok(())
     }
 
-    /// Analyze buffered input samples
+    /// Analyze and match burst detections with bursts
     ///
-    /// Call this periodically from the main thread to process received audio.
-    /// Uses burst detection with timestamps for latency measurement and
-    /// frame counter tracking for loss detection.
+    /// Call this periodically from the main thread to:
+    /// 1. Register burst events from output callback
+    /// 2. Match detection events from input callback using frame arithmetic
+    /// 3. Process counter samples for loss detection
+    ///
+    /// This uses frame-based timing instead of wall-clock timestamps,
+    /// eliminating the ~500ms error caused by ring buffer accumulation.
     ///
     /// # Returns
-    /// Analysis result if a burst was detected and matched
+    /// Analysis result if a detection was matched with a burst
     pub fn analyze(&mut self) -> Option<AnalysisResult> {
-        let burst_consumer = self.input_consumer.as_mut()?;
         let counter_consumer = self.counter_consumer.as_mut()?;
         let shared_state = self.shared_state.as_ref()?;
         let burst_event_rx = self.burst_event_rx.as_ref()?;
-        let callback_time_rx = self.callback_time_rx.as_ref()?;
+        let detection_event_rx = self.detection_event_rx.as_ref()?;
 
-        // Register any pending burst events
+        // Register any pending burst events from output callback
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
             while let Ok(event) = burst_event_rx.try_recv() {
                 latency_analyzer.register_burst(event);
             }
         }
 
-        // Get callback timestamps
-        let mut callback_time = None;
-        while let Ok(ts) = callback_time_rx.try_recv() {
-            callback_time = Some(ts);
-        }
-
-        // Need at least some samples for analysis
-        let available = burst_consumer.occupied_len();
-        if available < 480 {
-            // ~10ms at 48kHz minimum
-            return None;
-        }
-
-        // Read burst samples from ring buffer
-        let read_count = available.min(RING_BUFFER_SIZE / 2);
-        let mut burst_samples = vec![0.0f32; read_count];
-        let burst_read = burst_consumer.pop_slice(&mut burst_samples);
-        burst_samples.truncate(burst_read);
-
-        // Read counter samples
-        let counter_available = counter_consumer.occupied_len().min(burst_read);
-        let mut counter_samples = vec![0.0f32; counter_available];
-        let counter_read = counter_consumer.pop_slice(&mut counter_samples);
-        counter_samples.truncate(counter_read);
-
-        // Run latency analysis
+        // Process detection events from input callback using frame-based matching
         let mut result = AnalysisResult::default();
+        let mut had_detection = false;
 
-        if let (Ok(mut latency_analyzer), Some(ts)) =
-            (shared_state.latency_analyzer.lock(), callback_time)
-        {
-            if let Some(latency_result) = latency_analyzer.analyze(&burst_samples, ts.time) {
-                result = latency_result.into();
-                result.is_healthy = result.confidence > 0.5;
-            } else {
-                // No burst detected in this batch, but still running
-                // Return last known result or indicate no measurement
+        if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
+            while let Ok(detection) = detection_event_rx.try_recv() {
+                // Frame-based matching - simple arithmetic, no timestamps!
+                if let Some(latency_result) = latency_analyzer.match_detection(&detection) {
+                    result = latency_result.into();
+                    result.is_healthy = result.confidence > 0.5;
+                    had_detection = true;
+                }
+            }
+
+            // If no new detection, use last known result with decaying confidence
+            if !had_detection {
                 if let Some(last) = latency_analyzer.last_result() {
                     result.latency_samples = last.latency_samples;
                     result.latency_ms = last.latency_ms;
@@ -685,7 +673,13 @@ impl AudioEngine {
         }
 
         // Frame-based loss detection from counter channel
-        if !counter_samples.is_empty() {
+        let counter_available = counter_consumer.occupied_len();
+        if counter_available > 0 {
+            let read_count = counter_available.min(RING_BUFFER_SIZE / 2);
+            let mut counter_samples = vec![0.0f32; read_count];
+            let counter_read = counter_consumer.pop_slice(&mut counter_samples);
+            counter_samples.truncate(counter_read);
+
             if let Ok(mut frame_analyzer) = shared_state.frame_analyzer.lock() {
                 let frame_loss = frame_analyzer.detect_frame_loss(&counter_samples);
                 result.lost_samples = frame_loss;
@@ -769,6 +763,7 @@ impl Drop for AudioEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn test_engine_creation() {
