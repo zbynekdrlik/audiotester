@@ -137,34 +137,38 @@ impl LatencyAnalyzer {
     /// # Returns
     /// Latency result if a matching burst was found
     pub fn match_detection(&mut self, detection: &DetectionEvent) -> Option<LatencyResult> {
-        // Find burst whose output_frame is < detection.input_frame
-        // AND within reasonable latency window
+        // Find the NEWEST burst within latency window. Using newest-first
+        // naturally handles signal recovery: after a period of no detections,
+        // stale bursts have large frame diffs and are skipped, while the
+        // most recent burst matches with the correct latency.
         let max_latency_frames = MAX_LATENCY_FRAMES;
 
         let mut matched_index = None;
 
-        for (i, burst) in self.pending_bursts.iter().enumerate() {
+        for (i, burst) in self.pending_bursts.iter().enumerate().rev() {
             if detection.input_frame >= burst.start_frame {
                 let diff = detection.input_frame - burst.start_frame;
                 if diff < max_latency_frames {
                     matched_index = Some(i);
-                    break; // Match with oldest valid burst
+                    break; // Match with newest valid burst
                 }
             }
         }
 
         if let Some(i) = matched_index {
             let burst = self.pending_bursts.remove(i).unwrap();
+            // Discard all older bursts (they're stale)
+            self.pending_bursts
+                .drain(..i.min(self.pending_bursts.len()));
             let result = self.calculate_latency_from_frames(&burst, detection);
             self.last_result = Some(result.clone());
             return Some(result);
         }
 
         // Clean up stale bursts (too old to match)
-        if let Some(detection_frame) = Some(detection.input_frame) {
-            self.pending_bursts
-                .retain(|b| detection_frame.saturating_sub(b.start_frame) < max_latency_frames * 2);
-        }
+        self.pending_bursts.retain(|b| {
+            detection.input_frame.saturating_sub(b.start_frame) < max_latency_frames * 2
+        });
 
         None
     }

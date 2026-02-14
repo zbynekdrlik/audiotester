@@ -168,8 +168,6 @@ pub struct AudioEngine {
     burst_event_rx: Option<std::sync::mpsc::Receiver<BurstEvent>>,
     /// Receiver for detection events from input callback
     detection_event_rx: Option<std::sync::mpsc::Receiver<DetectionEvent>>,
-    /// Whether stale events have been flushed after signal loss
-    stale_flushed: bool,
 }
 
 impl AudioEngine {
@@ -187,7 +185,6 @@ impl AudioEngine {
             counter_consumer: None,
             burst_event_rx: None,
             detection_event_rx: None,
-            stale_flushed: false,
         }
     }
 
@@ -656,36 +653,6 @@ impl AudioEngine {
         let shared_state = self.shared_state.as_ref()?;
         let burst_event_rx = self.burst_event_rx.as_ref()?;
         let detection_event_rx = self.detection_event_rx.as_ref()?;
-
-        // Flush stale events after signal loss (once).
-        // When signal is lost, burst events accumulate in the channel with no
-        // matching detections. These must be flushed before recovery, otherwise
-        // the first detection after unmute matches a stale burst and produces
-        // wildly wrong latency (e.g. 404ms instead of 4ms).
-        // Flush only ONCE (stale_flushed flag) then let fresh events flow.
-        let signal_lost_now = shared_state
-            .latency_analyzer
-            .lock()
-            .ok()
-            .and_then(|a| {
-                a.last_result()
-                    .map(|r| r.timestamp.elapsed().as_secs_f32() > 1.0)
-            })
-            .unwrap_or(false);
-
-        if signal_lost_now && !self.stale_flushed {
-            // Drain stale burst and detection events from channels
-            while burst_event_rx.try_recv().is_ok() {}
-            while detection_event_rx.try_recv().is_ok() {}
-            // Clear stale pending bursts in the analyzer
-            if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
-                latency_analyzer.clear_pending();
-            }
-            self.stale_flushed = true;
-        } else if !signal_lost_now {
-            // Reset flush flag when signal returns
-            self.stale_flushed = false;
-        }
 
         // Register any pending burst events from output callback
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
