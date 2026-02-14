@@ -121,15 +121,12 @@ export async function queryProperty(
 }
 
 /**
- * Remove a routing point (disconnect audio path).
+ * Mute a routing point (disconnect audio path).
+ * Uses Mute property which reliably stops audio flow.
  *
- * @param host - VBMatrix host
- * @param slotIn - Input slot SUID (e.g., "VASIO8")
- * @param channelIn - Input channel (1-based)
- * @param slotOut - Output slot SUID (e.g., "VASIO8")
- * @param channelOut - Output channel (1-based)
+ * NOTE: .Remove is unreliable after re-creation. Use .Mute instead.
  */
-export async function removeRoutingPoint(
+export async function muteRoutingPoint(
   host: string,
   slotIn: string,
   channelIn: number,
@@ -139,55 +136,50 @@ export async function removeRoutingPoint(
 ): Promise<void> {
   await sendCommand(
     host,
-    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).Remove;`,
+    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).Mute = 1;`,
     { port },
   );
 }
 
 /**
- * Restore a routing point with specified gain.
- *
- * @param host - VBMatrix host
- * @param slotIn - Input slot SUID (e.g., "VASIO8")
- * @param channelIn - Input channel (1-based)
- * @param slotOut - Output slot SUID (e.g., "VASIO8")
- * @param channelOut - Output channel (1-based)
- * @param dBGain - Gain in dB (default: 0.0)
+ * Unmute a routing point (restore audio path).
  */
-export async function restoreRoutingPoint(
+export async function unmuteRoutingPoint(
   host: string,
   slotIn: string,
   channelIn: number,
   slotOut: string,
   channelOut: number,
-  dBGain: number = 0.0,
   port?: number,
 ): Promise<void> {
   await sendCommand(
     host,
-    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).dBGain = ${dBGain.toFixed(1)};`,
+    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).Mute = 0;`,
     { port },
   );
 }
 
 /**
- * Disconnect the VASIO8 loopback (both channels).
+ * Disconnect the VASIO8 loopback (mute both channels).
  * This is the standard loopback used by audiotester.
  */
 export async function disconnectVasio8Loopback(host: string): Promise<void> {
-  await removeRoutingPoint(host, "VASIO8", 1, "VASIO8", 1);
+  await muteRoutingPoint(host, "VASIO8", 1, "VASIO8", 1);
   await new Promise((r) => setTimeout(r, 200));
-  await removeRoutingPoint(host, "VASIO8", 2, "VASIO8", 2);
+  await muteRoutingPoint(host, "VASIO8", 2, "VASIO8", 2);
 }
 
 /**
- * Reconnect the VASIO8 loopback (both channels at 0dB).
+ * Reconnect the VASIO8 loopback (unmute both channels).
  * This restores the standard loopback used by audiotester.
+ *
+ * NOTE: After routing changes, the audiotester monitoring may need
+ * a restart (stop + start) to re-establish the ASIO audio stream.
  */
 export async function reconnectVasio8Loopback(host: string): Promise<void> {
-  await restoreRoutingPoint(host, "VASIO8", 1, "VASIO8", 1, 0.0);
+  await unmuteRoutingPoint(host, "VASIO8", 1, "VASIO8", 1);
   await new Promise((r) => setTimeout(r, 200));
-  await restoreRoutingPoint(host, "VASIO8", 2, "VASIO8", 2, 0.0);
+  await unmuteRoutingPoint(host, "VASIO8", 2, "VASIO8", 2);
 }
 
 /**
