@@ -332,47 +332,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     emit_tray_status(new_status, result.latency_ms, result.lost_samples as u64);
                     tracing::debug!(status = ?new_status, "Tray status changed");
                 }
-
-                // Auto-recovery: restart ASIO stream after sustained signal loss.
-                // VBMatrix routing changes (mute/unmute) don't affect a running
-                // ASIO stream - the stream must be restarted to pick up changes.
-                // After 5 seconds of signal_lost, attempt recovery by restarting.
-                if signal_lost {
-                    if let Some(lost_at) = signal_lost_since {
-                        let lost_duration = lost_at.elapsed();
-                        // First attempt after 5s, then every 10s, up to 5 attempts
-                        let next_attempt_at = Duration::from_secs(5)
-                            + Duration::from_secs(10) * signal_recovery_attempts;
-                        if lost_duration >= next_attempt_at
-                            && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
-                        {
-                            signal_recovery_attempts += 1;
-                            tracing::info!(
-                                attempt = signal_recovery_attempts,
-                                lost_secs = lost_duration.as_secs(),
-                                "Signal lost - restarting ASIO stream for auto-recovery"
-                            );
-
-                            // Stop, re-select device, start (same as error recovery)
-                            if let Err(e) = engine.stop().await {
-                                tracing::debug!(error = %e, "Stop during signal recovery");
-                            }
-                            if let Some(ref device) = last_device_name {
-                                if let Err(e) = engine.select_device(device.clone()).await {
-                                    tracing::warn!(error = %e, "Re-select device during signal recovery");
-                                }
-                            }
-                            match engine.start().await {
-                                Ok(()) => {
-                                    tracing::info!("ASIO stream restarted for signal recovery")
-                                }
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Failed to restart ASIO stream")
-                                }
-                            }
-                        }
-                    }
-                }
             }
             Ok(None) => {
                 // No result yet (engine might be stopped or warming up)
@@ -391,50 +350,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         }
                     }
                 }
-                // Auto-recovery: restart ASIO stream after sustained signal loss.
-                // This handles the Ok(None) case where no analysis results are
-                // produced (e.g., muted VBMatrix routing = no audio samples).
-                if signal_lost {
-                    if let Some(lost_at) = signal_lost_since {
-                        let lost_duration = lost_at.elapsed();
-                        let next_attempt_at = Duration::from_secs(5)
-                            + Duration::from_secs(10) * signal_recovery_attempts;
-                        if lost_duration >= next_attempt_at
-                            && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
-                        {
-                            signal_recovery_attempts += 1;
-                            tracing::info!(
-                                attempt = signal_recovery_attempts,
-                                lost_secs = lost_duration.as_secs(),
-                                "Signal lost (no analysis) - restarting ASIO stream"
-                            );
-
-                            if let Err(e) = engine.stop().await {
-                                tracing::debug!(error = %e, "Stop during signal recovery");
-                            }
-                            if let Some(ref device) = last_device_name {
-                                if let Err(e) = engine.select_device(device.clone()).await {
-                                    tracing::warn!(
-                                        error = %e,
-                                        "Re-select device during signal recovery"
-                                    );
-                                }
-                            }
-                            match engine.start().await {
-                                Ok(()) => {
-                                    tracing::info!("ASIO stream restarted for signal recovery")
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        error = %e,
-                                        "Failed to restart ASIO stream"
-                                    )
-                                }
-                            }
-                        }
-                    }
-                }
-
                 // Still broadcast stats so dashboard updates
                 audiotester_server::ws::broadcast_stats(&state);
             }
@@ -505,6 +420,70 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     // Record failed reconnection
                     if let Ok(mut store) = stats.lock() {
                         store.record_disconnection((MAX_RECONNECT_ATTEMPTS as u64) * 5000, false);
+                    }
+                }
+            }
+        }
+
+        // Auto-recovery: restart ASIO stream after sustained signal loss.
+        // VBMatrix routing changes (mute/unmute) don't affect a running ASIO
+        // stream. After sustained signal_lost, stop + wait + start the engine
+        // to pick up routing changes. The delay is critical - ASIO drivers
+        // need time to release before re-acquisition.
+        if signal_lost && !reconnect_in_progress {
+            if let Some(lost_at) = signal_lost_since {
+                let lost_duration = lost_at.elapsed();
+                // First attempt after 5s, then every 15s, up to 5 attempts
+                let next_attempt_at =
+                    Duration::from_secs(5) + Duration::from_secs(15) * signal_recovery_attempts;
+                if lost_duration >= next_attempt_at
+                    && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
+                {
+                    signal_recovery_attempts += 1;
+                    // Save device name before stopping (device_info_update may clear it)
+                    let saved_device = last_device_name.clone();
+                    tracing::info!(
+                        attempt = signal_recovery_attempts,
+                        lost_secs = lost_duration.as_secs(),
+                        device = ?saved_device,
+                        "Signal lost - restarting ASIO stream for auto-recovery"
+                    );
+
+                    // Stop the engine
+                    if let Err(e) = engine.stop().await {
+                        tracing::debug!(error = %e, "Stop during signal recovery");
+                    }
+
+                    // CRITICAL: Wait for ASIO driver to fully release
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+
+                    // Re-select device to reinitialize ASIO
+                    if let Some(ref device) = saved_device {
+                        match engine.select_device(device.clone()).await {
+                            Ok(()) => tracing::debug!(device = %device, "Device re-selected"),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Re-select failed, trying start anyway");
+                            }
+                        }
+                    }
+
+                    // Start the engine
+                    match engine.start().await {
+                        Ok(()) => {
+                            tracing::info!(
+                                attempt = signal_recovery_attempts,
+                                "ASIO stream restarted for signal recovery"
+                            );
+                            // Give the engine time to produce analysis results
+                            tokio::time::sleep(Duration::from_secs(2)).await;
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                attempt = signal_recovery_attempts,
+                                error = %e,
+                                "Failed to restart ASIO stream for signal recovery"
+                            );
+                        }
                     }
                 }
             }
