@@ -190,6 +190,8 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let start_time = std::time::Instant::now();
     let mut last_device_name: Option<String> = None;
     let mut device_info_update_counter: u32 = 0;
+    let mut last_successful_analysis: Option<std::time::Instant> = None;
+    let mut signal_lost = false;
 
     // Wait for Tauri APP_HANDLE to be available (setup happens in parallel)
     while APP_HANDLE.get().is_none() {
@@ -244,6 +246,18 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
+                // Update last successful analysis time
+                last_successful_analysis = Some(std::time::Instant::now());
+
+                // Reset signal_lost if it was set
+                if signal_lost {
+                    signal_lost = false;
+                    if let Ok(mut store) = stats.lock() {
+                        store.set_signal_lost(false);
+                    }
+                    tracing::info!("Signal restored");
+                }
+
                 // Reset failure counter on successful analysis
                 if consecutive_failures > 0 {
                     tracing::info!(
@@ -290,6 +304,20 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             }
             Ok(None) => {
                 // No result yet (engine might be stopped or warming up)
+                // Check for signal timeout (1 second without analysis result while engine running)
+                if let Ok(status) = engine.get_status().await {
+                    if status.state == audiotester_core::audio::engine::EngineState::Running {
+                        if let Some(last) = last_successful_analysis {
+                            if last.elapsed() > Duration::from_secs(1) && !signal_lost {
+                                signal_lost = true;
+                                if let Ok(mut store) = stats.lock() {
+                                    store.set_signal_lost(true);
+                                }
+                                tracing::warn!("No signal detected (analysis timeout)");
+                            }
+                        }
+                    }
+                }
                 // Still broadcast stats so dashboard updates
                 audiotester_server::ws::broadcast_stats(&state);
             }

@@ -53,6 +53,7 @@ fn build_stats_json(state: &AppState) -> Option<String> {
         loss_events,
         samples_sent: stats.samples_sent,
         samples_received: stats.samples_received,
+        signal_lost: stats.signal_lost,
     };
     serde_json::to_string(&response).ok()
 }

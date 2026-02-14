@@ -94,6 +94,8 @@ pub struct RunningStats {
     pub samples_sent: u64,
     /// Total samples received since reset
     pub samples_received: u64,
+    /// True when no signal is being received (analysis timeout)
+    pub signal_lost: bool,
 }
 
 impl StatsStore {
@@ -391,6 +393,16 @@ impl StatsStore {
     /// Set samples received counter (cumulative from engine)
     pub fn set_samples_received(&mut self, count: u64) {
         self.stats.samples_received = count;
+    }
+
+    /// Set signal lost state
+    pub fn set_signal_lost(&mut self, lost: bool) {
+        self.stats.signal_lost = lost;
+    }
+
+    /// Get signal lost state
+    pub fn signal_lost(&self) -> bool {
+        self.stats.signal_lost
     }
 }
 
