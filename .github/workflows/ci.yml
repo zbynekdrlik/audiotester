@@ -408,31 +408,67 @@ jobs:
         shell: bash
         run: |
           # STRICT CI VALIDATION
-          # All jobs must succeed (or be skipped for conditional jobs)
-          # deploy-dev is now BLOCKING - hardware verification required
+          # Core jobs must always succeed
+          # Deployment jobs: REQUIRED for dev pushes, skipped only for PRs
+
+          echo "Event: ${{ github.event_name }}"
+          echo "Ref: ${{ github.ref }}"
+          echo ""
+          echo "Job Results:"
+          echo "  branch-check: ${{ needs.branch-check.result }}"
+          echo "  main-sync: ${{ needs.main-sync.result }}"
+          echo "  fmt: ${{ needs.fmt.result }}"
+          echo "  clippy: ${{ needs.clippy.result }}"
+          echo "  build: ${{ needs.build.result }}"
+          echo "  test: ${{ needs.test.result }}"
+          echo "  e2e: ${{ needs.e2e.result }}"
+          echo "  playwright: ${{ needs.playwright.result }}"
+          echo "  build-dev: ${{ needs.build-dev.result }}"
+          echo "  deploy-dev: ${{ needs.deploy-dev.result }}"
+          echo ""
+
+          # Core jobs must always pass
           if [[ "${{ needs.branch-check.result }}" != "success" ]] || \
-             [[ "${{ needs.main-sync.result }}" != "success" && "${{ needs.main-sync.result }}" != "skipped" ]] || \
              [[ "${{ needs.fmt.result }}" != "success" ]] || \
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
              [[ "${{ needs.e2e.result }}" != "success" ]] || \
-             [[ "${{ needs.playwright.result }}" != "success" ]] || \
-             [[ "${{ needs.build-dev.result }}" != "success" && "${{ needs.build-dev.result }}" != "skipped" ]] || \
-             [[ "${{ needs.deploy-dev.result }}" != "success" && "${{ needs.deploy-dev.result }}" != "skipped" ]]; then
-            echo "::error::One or more jobs failed - PR cannot merge"
-            echo ""
-            echo "Job Results:"
-            echo "  branch-check: ${{ needs.branch-check.result }}"
-            echo "  main-sync: ${{ needs.main-sync.result }}"
-            echo "  fmt: ${{ needs.fmt.result }}"
-            echo "  clippy: ${{ needs.clippy.result }}"
-            echo "  build: ${{ needs.build.result }}"
-            echo "  test: ${{ needs.test.result }}"
-            echo "  e2e: ${{ needs.e2e.result }}"
-            echo "  playwright: ${{ needs.playwright.result }}"
-            echo "  build-dev: ${{ needs.build-dev.result }}"
-            echo "  deploy-dev: ${{ needs.deploy-dev.result }}"
+             [[ "${{ needs.playwright.result }}" != "success" ]]; then
+            echo "::error::Core CI jobs failed - cannot merge"
             exit 1
           fi
-          echo "All CI checks passed including hardware verification!"
+
+          # main-sync is only for dev pushes, can be skipped for PRs
+          if [[ "${{ needs.main-sync.result }}" != "success" && "${{ needs.main-sync.result }}" != "skipped" ]]; then
+            echo "::error::main-sync check failed"
+            exit 1
+          fi
+
+          # DEPLOYMENT JOBS: MUST SUCCEED for dev pushes, MUST NOT SKIP
+          # On dev push: deploy-dev MUST run and succeed
+          # On PR: these jobs don't run (different trigger), so skipped is OK
+          if [[ "${{ github.event_name }}" == "push" && "${{ github.ref }}" == "refs/heads/dev" ]]; then
+            if [[ "${{ needs.build-dev.result }}" != "success" ]]; then
+              echo "::error::build-dev MUST succeed for dev pushes (got: ${{ needs.build-dev.result }})"
+              exit 1
+            fi
+            if [[ "${{ needs.deploy-dev.result }}" != "success" ]]; then
+              echo "::error::deploy-dev MUST succeed for dev pushes (got: ${{ needs.deploy-dev.result }})"
+              echo "::error::Hardware verification is REQUIRED before PR can be merged"
+              exit 1
+            fi
+            echo "Deployment to iem.lan verified successfully!"
+          else
+            # For PRs, deployment jobs legitimately don't run
+            if [[ "${{ needs.build-dev.result }}" != "skipped" && "${{ needs.build-dev.result }}" != "success" ]]; then
+              echo "::error::build-dev unexpected status: ${{ needs.build-dev.result }}"
+              exit 1
+            fi
+            if [[ "${{ needs.deploy-dev.result }}" != "skipped" && "${{ needs.deploy-dev.result }}" != "success" ]]; then
+              echo "::error::deploy-dev unexpected status: ${{ needs.deploy-dev.result }}"
+              exit 1
+            fi
+          fi
+
+          echo "All CI checks passed!"
