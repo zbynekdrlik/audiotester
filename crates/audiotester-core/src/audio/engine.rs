@@ -675,12 +675,17 @@ impl AudioEngine {
                 }
             }
 
-            // If no new detection, use last known result with decaying confidence
+            // If no new detection, use last known result with time-based confidence decay.
+            // When input goes silent (e.g. VBMatrix route muted), burst detections stop.
+            // Confidence must decay to 0 so signal_lost triggers within ~1 second.
             if !had_detection {
                 if let Some(last) = latency_analyzer.last_result() {
                     result.latency_samples = last.latency_samples;
                     result.latency_ms = last.latency_ms;
-                    result.confidence = last.confidence * 0.95; // Decay confidence
+                    // Time-based decay: half-life of 0.3 seconds
+                    // ~0.5s: confidence ≈ 0.31, ~0.6s: confidence ≈ 0.25 (below 0.3 threshold)
+                    let elapsed = last.timestamp.elapsed().as_secs_f32();
+                    result.confidence = last.confidence * 0.5f32.powf(elapsed / 0.3);
                     result.is_healthy = result.confidence > 0.3;
                 }
             }
