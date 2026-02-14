@@ -186,11 +186,7 @@
     resetBtn.addEventListener("click", function () {
       fetch("/api/v1/reset", { method: "POST" })
         .then(function (res) {
-          return res.json();
-        })
-        .then(function (data) {
-          if (data.success) {
-            // Counters will update on next WS message
+          if (res.ok) {
             resetBtn.textContent = "Done!";
             setTimeout(function () {
               resetBtn.textContent = "Reset";

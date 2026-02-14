@@ -9,13 +9,15 @@ pub mod ws;
 
 use audiotester_core::audio::engine::{AnalysisResult, AudioEngine, DeviceInfo, EngineState};
 use audiotester_core::stats::store::StatsStore;
-use axum::http::header;
+use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
 use axum::Router;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 /// Commands sent to the engine thread
 pub enum EngineCommand {
@@ -214,7 +216,7 @@ impl Default for ServerConfig {
 impl AppState {
     /// Create a new AppState with the given engine handle and stats store
     pub fn new(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, config: ServerConfig) -> Self {
-        let (ws_tx, _) = tokio::sync::broadcast::channel(64);
+        let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             engine,
             stats,
@@ -261,6 +263,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/manifest.json", axum::routing::get(serve_manifest))
         // Static assets (CSS, JS)
         .nest_service("/assets", ServeDir::new("assets"))
+        .layer(CorsLayer::permissive())
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        ))
         .with_state(state)
 }
 

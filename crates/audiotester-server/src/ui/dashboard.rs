@@ -27,6 +27,7 @@ fn DashboardPage() -> impl IntoView {
                 <meta name="apple-mobile-web-app-capable" content="yes"/>
                 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
                 <meta name="theme-color" content="#1a1a2e"/>
+                <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"/>
                 <link rel="manifest" href="/manifest.json"/>
                 <title>"Audiotester - Dashboard"</title>
                 <style>{DASHBOARD_STYLES}</style>
