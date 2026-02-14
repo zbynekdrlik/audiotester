@@ -427,9 +427,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
         // Auto-recovery: restart ASIO stream after sustained signal loss.
         // VBMatrix routing changes (mute/unmute) don't affect a running ASIO
-        // stream. After sustained signal_lost, stop + wait + start the engine
-        // to pick up routing changes. The delay is critical - ASIO drivers
-        // need time to release before re-acquisition.
+        // stream. Simple stop + wait + start (NO device re-select) picks up
+        // routing changes. Re-selecting the device would try to open a new
+        // ASIO handle while the old one isn't fully released, causing failure.
         if signal_lost && !reconnect_in_progress {
             if let Some(lost_at) = signal_lost_since {
                 let lost_duration = lost_at.elapsed();
@@ -440,42 +440,28 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
                 {
                     signal_recovery_attempts += 1;
-                    // Save device name before stopping (device_info_update may clear it)
-                    let saved_device = last_device_name.clone();
                     tracing::info!(
                         attempt = signal_recovery_attempts,
                         lost_secs = lost_duration.as_secs(),
-                        device = ?saved_device,
                         "Signal lost - restarting ASIO stream for auto-recovery"
                     );
 
-                    // Stop the engine
+                    // Stop the engine (releases ASIO streams)
                     if let Err(e) = engine.stop().await {
                         tracing::debug!(error = %e, "Stop during signal recovery");
                     }
 
-                    // CRITICAL: Wait for ASIO driver to fully release
-                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    // Wait for ASIO driver to release streams
+                    tokio::time::sleep(Duration::from_millis(500)).await;
 
-                    // Re-select device to reinitialize ASIO
-                    if let Some(ref device) = saved_device {
-                        match engine.select_device(device.clone()).await {
-                            Ok(()) => tracing::debug!(device = %device, "Device re-selected"),
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Re-select failed, trying start anyway");
-                            }
-                        }
-                    }
-
-                    // Start the engine
+                    // Start the engine (device is already selected, just
+                    // creates new streams - same as manual monitoring restart)
                     match engine.start().await {
                         Ok(()) => {
                             tracing::info!(
                                 attempt = signal_recovery_attempts,
                                 "ASIO stream restarted for signal recovery"
                             );
-                            // Give the engine time to produce analysis results
-                            tokio::time::sleep(Duration::from_secs(2)).await;
                         }
                         Err(e) => {
                             tracing::error!(
