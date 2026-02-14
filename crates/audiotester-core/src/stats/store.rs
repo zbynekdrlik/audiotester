@@ -382,6 +382,16 @@ impl StatsStore {
     pub fn samples_received(&self) -> u64 {
         self.stats.samples_received
     }
+
+    /// Set samples sent counter (cumulative from engine)
+    pub fn set_samples_sent(&mut self, count: u64) {
+        self.stats.samples_sent = count;
+    }
+
+    /// Set samples received counter (cumulative from engine)
+    pub fn set_samples_received(&mut self, count: u64) {
+        self.stats.samples_received = count;
+    }
 }
 
 impl Default for StatsStore {
@@ -450,5 +460,24 @@ mod tests {
 
         // Should be limited to MAX_HISTORY_SIZE
         assert_eq!(store.latency_history().len(), MAX_HISTORY_SIZE);
+    }
+
+    #[test]
+    fn test_set_sample_counters() {
+        let mut store = StatsStore::new();
+
+        // Set counters directly (cumulative from engine)
+        store.set_samples_sent(1000);
+        store.set_samples_received(999);
+
+        assert_eq!(store.samples_sent(), 1000);
+        assert_eq!(store.samples_received(), 999);
+
+        // Overwrite with new cumulative values
+        store.set_samples_sent(2500);
+        store.set_samples_received(2490);
+
+        assert_eq!(store.samples_sent(), 2500);
+        assert_eq!(store.samples_received(), 2490);
     }
 }
