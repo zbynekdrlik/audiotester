@@ -9,6 +9,8 @@ pub mod ws;
 
 use audiotester_core::audio::engine::{AnalysisResult, AudioEngine, DeviceInfo, EngineState};
 use audiotester_core::stats::store::StatsStore;
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Router;
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
@@ -204,6 +206,14 @@ impl AppState {
     }
 }
 
+/// Serve the PWA manifest.json
+async fn serve_manifest() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/manifest+json")],
+        ui::MANIFEST_JSON,
+    )
+}
+
 /// Build the Axum router with all routes
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -222,8 +232,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/monitoring",
             axum::routing::post(api::toggle_monitoring),
         )
+        .route("/api/v1/reset", axum::routing::post(api::reset_stats))
         // WebSocket
         .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
+        // PWA manifest
+        .route("/manifest.json", axum::routing::get(serve_manifest))
         // Static assets (CSS, JS)
         .nest_service("/assets", ServeDir::new("assets"))
         .with_state(state)

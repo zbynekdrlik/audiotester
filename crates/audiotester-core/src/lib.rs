@@ -20,7 +20,7 @@ pub mod stats;
 // Primary exports - new burst-based latency system
 pub use audio::burst::{BurstEvent, BurstGenerator};
 pub use audio::detector::BurstDetector;
-pub use audio::engine::AudioEngine;
+pub use audio::engine::{AudioEngine, ConnectionState};
 pub use audio::latency::{LatencyAnalyzer, LatencyResult};
 
 // Frame-based loss detection
@@ -29,7 +29,7 @@ pub use audio::analyzer::Analyzer;
 // Legacy MLS exports (for backward compatibility and fallback)
 pub use audio::signal::MlsGenerator;
 
-pub use stats::store::StatsStore;
+pub use stats::store::{DisconnectionEvent, LossEvent, StatsStore};
 
 /// Application version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -46,7 +46,14 @@ fn no_ignored_tests() {
 /// Verify E2E test files exist and are not empty
 #[test]
 fn e2e_tests_exist() {
-    let test_files = ["e2e_signal.rs", "e2e_latency.rs", "e2e_loss.rs"];
+    let test_files = [
+        "e2e_signal.rs",
+        "e2e_latency.rs",
+        "e2e_loss.rs",
+        "e2e_tray.rs",
+        "e2e_reconnection.rs",
+        "e2e_dashboard.rs",
+    ];
 
     for file in test_files {
         let path = format!("tests/{}", file);

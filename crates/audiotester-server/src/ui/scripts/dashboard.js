@@ -14,9 +14,26 @@
     corrupted: document.querySelector('[data-testid="corrupted-value"]'),
   };
 
+  // Device info elements
+  const deviceNameEl = document.getElementById("device-name");
+  const sampleRateEl = document.getElementById("sample-rate-display");
+  const uptimeEl = document.getElementById("uptime-display");
+  const resetBtn = document.getElementById("reset-btn");
+
   // Chart data
   let latencyData = [];
   let lossData = [];
+
+  // Format uptime seconds into human-readable string
+  function formatUptime(seconds) {
+    if (!seconds || seconds === 0) return "--";
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = seconds % 60;
+    if (h > 0) return h + "h " + m + "m";
+    if (m > 0) return m + "m " + s + "s";
+    return s + "s";
+  }
 
   // Simple canvas chart renderer
   function drawChart(containerId, data, color, label) {
@@ -107,6 +124,18 @@
     if (els.lost) els.lost.textContent = stats.total_lost.toString();
     if (els.corrupted)
       els.corrupted.textContent = stats.total_corrupted.toString();
+
+    // Update device info
+    if (deviceNameEl && stats.device_name) {
+      deviceNameEl.textContent = stats.device_name;
+    }
+    if (sampleRateEl && stats.sample_rate) {
+      sampleRateEl.textContent =
+        stats.sample_rate > 0 ? stats.sample_rate + " Hz" : "--";
+    }
+    if (uptimeEl && stats.uptime_seconds !== undefined) {
+      uptimeEl.textContent = formatUptime(stats.uptime_seconds);
+    }
   }
 
   function updateCharts(stats) {
@@ -119,6 +148,28 @@
 
     drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
     drawChart("loss-chart", lossData, "#ff4040", "Lost samples");
+  }
+
+  // Reset button handler
+  if (resetBtn) {
+    resetBtn.addEventListener("click", function () {
+      fetch("/api/v1/reset", { method: "POST" })
+        .then(function (res) {
+          return res.json();
+        })
+        .then(function (data) {
+          if (data.success) {
+            // Counters will update on next WS message
+            resetBtn.textContent = "Done!";
+            setTimeout(function () {
+              resetBtn.textContent = "Reset";
+            }, 1500);
+          }
+        })
+        .catch(function (err) {
+          console.error("Reset failed:", err);
+        });
+    });
   }
 
   // WebSocket connection with auto-reconnect
@@ -159,7 +210,7 @@
     };
   }
 
-  // Initial chart render on window resize
+  // Redraw charts on window resize
   window.addEventListener("resize", function () {
     drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
     drawChart("loss-chart", lossData, "#ff4040", "Lost samples");

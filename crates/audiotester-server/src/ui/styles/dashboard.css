@@ -4,12 +4,19 @@
   box-sizing: border-box;
 }
 
+html,
 body {
   font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   background: #1a1a2e;
   color: #e0e0e0;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
 }
 
 .header {
@@ -19,6 +26,7 @@ body {
   padding: 0.75rem 1.5rem;
   background: #16213e;
   border-bottom: 1px solid #0f3460;
+  flex-shrink: 0;
 }
 
 .header h1 {
@@ -70,6 +78,11 @@ nav {
 
 main {
   padding: 1rem 1.5rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .summary-bar {
@@ -80,6 +93,8 @@ main {
   border-radius: 8px;
   margin-bottom: 1rem;
   flex-wrap: wrap;
+  flex-shrink: 0;
+  align-items: center;
 }
 
 .metric {
@@ -117,33 +132,86 @@ main {
   color: #00c800;
 }
 
+.device-info-bar {
+  display: flex;
+  gap: 1.5rem;
+  padding: 0.5rem 1rem;
+  background: #16213e;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+  flex-shrink: 0;
+  font-size: 0.8rem;
+  color: #8892b0;
+  align-items: center;
+}
+
+.device-info-bar .info-item {
+  display: flex;
+  gap: 0.3rem;
+}
+
+.device-info-bar .info-label {
+  color: #5c6b8a;
+}
+
+.device-info-bar .info-value {
+  color: #a0b0d0;
+  font-weight: 500;
+}
+
+.btn-reset {
+  margin-left: auto;
+  padding: 0.3rem 0.8rem;
+  background: rgba(255, 165, 0, 0.15);
+  color: #ffa500;
+  border: 1px solid rgba(255, 165, 0, 0.3);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: background 0.2s;
+}
+
+.btn-reset:hover {
+  background: rgba(255, 165, 0, 0.3);
+}
+
 .charts {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 1rem;
+  flex: 1;
+  min-height: 0;
 }
 
 .chart-container {
   background: #16213e;
   border-radius: 8px;
   padding: 1rem;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 .chart-container h2 {
   font-size: 0.9rem;
   color: #8892b0;
   margin-bottom: 0.5rem;
+  flex-shrink: 0;
 }
 
 .chart {
   width: 100%;
-  height: 200px;
+  flex: 1;
   background: #0f1729;
   border-radius: 4px;
   position: relative;
+  min-height: 100px;
 }
 
 .chart canvas {
   width: 100% !important;
+  height: 100% !important;
 }
 
 @media (max-width: 600px) {
@@ -159,5 +227,9 @@ main {
   }
   main {
     padding: 0.75rem;
+  }
+  .device-info-bar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
   }
 }
