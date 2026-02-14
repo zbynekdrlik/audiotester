@@ -308,7 +308,7 @@ jobs:
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ${{ secrets.IEM_USER }} /F /IT"
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
 
       - name: Start application
         env:
@@ -317,7 +317,7 @@ jobs:
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
             "schtasks /Run /TN audiotester"
-          sleep 5
+          sleep 10
 
       - name: Verify deployment
         env:
