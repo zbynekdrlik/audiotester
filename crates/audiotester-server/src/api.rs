@@ -47,6 +47,8 @@ pub struct StatsResponse {
     pub samples_received: u64,
     /// True when no signal is being received (analysis timeout)
     pub signal_lost: bool,
+    /// Last correlation confidence (0.0 to 1.0, for debugging)
+    pub confidence: f32,
 }
 
 /// Loss event response for API
@@ -170,6 +172,7 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
         samples_sent: stats.samples_sent,
         samples_received: stats.samples_received,
         signal_lost: stats.signal_lost,
+        confidence: stats.last_confidence,
     })
 }
 
@@ -377,6 +380,7 @@ mod tests {
             samples_sent: 1000000,
             samples_received: 999950,
             signal_lost: false,
+            confidence: 0.85,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"current_latency\":5.0"));
@@ -385,6 +389,7 @@ mod tests {
         assert!(json.contains("\"samples_sent\":1000000"));
         assert!(json.contains("\"samples_received\":999950"));
         assert!(json.contains("\"signal_lost\":false"));
+        assert!(json.contains("\"confidence\":0.85"));
     }
 
     #[test]
