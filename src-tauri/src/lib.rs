@@ -192,6 +192,8 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut device_info_update_counter: u32 = 0;
     let mut last_successful_analysis: Option<std::time::Instant> = None;
     let mut signal_lost = false;
+    let mut signal_lost_since: Option<std::time::Instant> = None;
+    let mut signal_recovery_attempts: u32 = 0;
 
     // Wait for Tauri APP_HANDLE to be available (setup happens in parallel)
     while APP_HANDLE.get().is_none() {
@@ -261,6 +263,8 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     // Reset signal_lost if it was set
                     if signal_lost {
                         signal_lost = false;
+                        signal_lost_since = None;
+                        signal_recovery_attempts = 0;
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
@@ -273,6 +277,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 } else if !signal_lost {
                     // Invalid signal - set signal_lost immediately
                     signal_lost = true;
+                    signal_lost_since = Some(std::time::Instant::now());
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(true);
                     }
@@ -327,6 +332,47 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     emit_tray_status(new_status, result.latency_ms, result.lost_samples as u64);
                     tracing::debug!(status = ?new_status, "Tray status changed");
                 }
+
+                // Auto-recovery: restart ASIO stream after sustained signal loss.
+                // VBMatrix routing changes (mute/unmute) don't affect a running
+                // ASIO stream - the stream must be restarted to pick up changes.
+                // After 5 seconds of signal_lost, attempt recovery by restarting.
+                if signal_lost {
+                    if let Some(lost_at) = signal_lost_since {
+                        let lost_duration = lost_at.elapsed();
+                        // First attempt after 5s, then every 10s, up to 5 attempts
+                        let next_attempt_at = Duration::from_secs(5)
+                            + Duration::from_secs(10) * signal_recovery_attempts;
+                        if lost_duration >= next_attempt_at
+                            && signal_recovery_attempts < MAX_RECONNECT_ATTEMPTS
+                        {
+                            signal_recovery_attempts += 1;
+                            tracing::info!(
+                                attempt = signal_recovery_attempts,
+                                lost_secs = lost_duration.as_secs(),
+                                "Signal lost - restarting ASIO stream for auto-recovery"
+                            );
+
+                            // Stop, re-select device, start (same as error recovery)
+                            if let Err(e) = engine.stop().await {
+                                tracing::debug!(error = %e, "Stop during signal recovery");
+                            }
+                            if let Some(ref device) = last_device_name {
+                                if let Err(e) = engine.select_device(device.clone()).await {
+                                    tracing::warn!(error = %e, "Re-select device during signal recovery");
+                                }
+                            }
+                            match engine.start().await {
+                                Ok(()) => {
+                                    tracing::info!("ASIO stream restarted for signal recovery")
+                                }
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to restart ASIO stream")
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Ok(None) => {
                 // No result yet (engine might be stopped or warming up)
@@ -336,6 +382,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         if let Some(last) = last_successful_analysis {
                             if last.elapsed() > Duration::from_secs(1) && !signal_lost {
                                 signal_lost = true;
+                                signal_lost_since = Some(std::time::Instant::now());
                                 if let Ok(mut store) = stats.lock() {
                                     store.set_signal_lost(true);
                                 }
