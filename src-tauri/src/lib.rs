@@ -14,8 +14,16 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 /// Global AppHandle storage for cross-thread tray updates
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
 
+/// Notify when APP_HANDLE becomes available (replaces busy-wait polling)
+static APP_HANDLE_NOTIFY: OnceLock<Arc<tokio::sync::Notify>> = OnceLock::new();
+
 /// Run the Tauri application
 pub fn run() {
+    // Set panic handler for better diagnostics
+    std::panic::set_hook(Box::new(|info| {
+        tracing::error!("PANIC: {}", info);
+    }));
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -26,6 +34,9 @@ pub fn run() {
 
     tracing::info!("Starting Audiotester v{}", audiotester_core::VERSION);
 
+    // Initialize the Notify before spawning any tasks
+    let _ = APP_HANDLE_NOTIFY.set(Arc::new(tokio::sync::Notify::new()));
+
     // Create shared state
     let engine = EngineHandle::spawn();
     let stats = Arc::new(Mutex::new(StatsStore::new()));
@@ -33,27 +44,25 @@ pub fn run() {
     let config = ServerConfig::default();
     let state = AppState::new(engine.clone(), Arc::clone(&stats), config);
 
+    // Single Tokio runtime for all async tasks
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    let rt_handle = rt.handle().clone();
+
     // Spawn the web server
     let server_state = state.clone();
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-        rt.block_on(async {
-            if let Err(e) = audiotester_server::start_server(server_state).await {
-                tracing::error!("Web server error: {}", e);
-            }
-        });
+    rt_handle.spawn(async move {
+        if let Err(e) = audiotester_server::start_server(server_state).await {
+            tracing::error!("Web server error: {}", e);
+        }
     });
 
-    // Spawn auto-configure thread if env vars are set
+    // Spawn auto-configure if env vars are set
     if std::env::var("AUDIOTESTER_DEVICE").is_ok()
         || std::env::var("AUDIOTESTER_AUTO_START").is_ok()
     {
         let auto_engine = engine.clone();
-        std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-            rt.block_on(async {
-                auto_configure(auto_engine).await;
-            });
+        rt_handle.spawn(async move {
+            auto_configure(auto_engine).await;
         });
     }
 
@@ -61,11 +70,13 @@ pub fn run() {
     let monitor_state = state.clone();
     let monitor_engine = engine;
     let monitor_stats = stats;
+    rt_handle.spawn(async move {
+        monitoring_loop(monitor_engine, monitor_stats, monitor_state).await;
+    });
+
+    // Keep runtime alive in a background thread (Tauri owns the main thread)
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-        rt.block_on(async {
-            monitoring_loop(monitor_engine, monitor_stats, monitor_state).await;
-        });
+        rt.block_on(std::future::pending::<()>());
     });
 
     // Build and run Tauri app
@@ -83,6 +94,10 @@ pub fn run() {
 
             // Store AppHandle globally for monitoring loop access
             let _ = APP_HANDLE.set(handle.clone());
+            // Notify waiting tasks that APP_HANDLE is available
+            if let Some(notify) = APP_HANDLE_NOTIFY.get() {
+                notify.notify_waiters();
+            }
 
             // Setup tray
             if let Err(e) = tray::setup_tray(&handle) {
@@ -94,8 +109,7 @@ pub fn run() {
             handle.listen("tray-status", move |event| {
                 if let Ok(payload) = serde_json::from_str::<tray::TrayStatusEvent>(event.payload())
                 {
-                    let status = payload.to_tray_status();
-                    if let Err(e) = tray::update_tray_status(&tray_handle, status) {
+                    if let Err(e) = tray::update_tray_status(&tray_handle, payload.status) {
                         tracing::warn!("Failed to update tray: {}", e);
                     }
                 }
@@ -192,10 +206,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut device_info_update_counter: u32 = 0;
     let mut last_successful_analysis: Option<std::time::Instant> = None;
     let mut signal_lost = false;
+    let mut reconnect_start: Option<std::time::Instant> = None;
 
-    // Wait for Tauri APP_HANDLE to be available (setup happens in parallel)
-    while APP_HANDLE.get().is_none() {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
+    if APP_HANDLE.get().is_none() {
+        if let Some(notify) = APP_HANDLE_NOTIFY.get() {
+            notify.notified().await;
+        }
     }
     tracing::info!("APP_HANDLE available, starting monitoring");
 
@@ -290,12 +307,16 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         consecutive_failures
                     );
 
-                    // Record successful reconnection
+                    // Record successful reconnection with actual duration
                     if reconnect_in_progress {
+                        let duration = reconnect_start
+                            .map(|s| s.elapsed().as_millis() as u64)
+                            .unwrap_or(0);
                         if let Ok(mut store) = stats.lock() {
-                            store.record_disconnection((consecutive_failures as u64) * 500, true);
+                            store.record_disconnection(duration, true);
                         }
                         reconnect_in_progress = false;
+                        reconnect_start = None;
                     }
                 }
                 consecutive_failures = 0;
@@ -351,6 +372,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             Err(e) => {
                 // Engine error - attempt reconnection
                 consecutive_failures += 1;
+                if !reconnect_in_progress {
+                    reconnect_start = Some(std::time::Instant::now());
+                }
                 reconnect_in_progress = true;
 
                 if consecutive_failures <= MAX_RECONNECT_ATTEMPTS {
@@ -396,6 +420,8 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                                 attempt = consecutive_failures,
                                 "Audio engine reconnected successfully"
                             );
+                            // Prevent false signal loss after reconnect
+                            last_successful_analysis = None;
                         }
                         Err(restart_err) => {
                             tracing::error!(
@@ -412,10 +438,14 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         MAX_RECONNECT_ATTEMPTS
                     );
 
-                    // Record failed reconnection
+                    // Record failed reconnection with actual duration
+                    let duration = reconnect_start
+                        .map(|s| s.elapsed().as_millis() as u64)
+                        .unwrap_or(0);
                     if let Ok(mut store) = stats.lock() {
-                        store.record_disconnection((MAX_RECONNECT_ATTEMPTS as u64) * 5000, false);
+                        store.record_disconnection(duration, false);
                     }
+                    reconnect_start = None;
                 }
             }
         }
@@ -426,12 +456,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 fn emit_tray_status(status: tray::TrayStatus, latency_ms: f64, lost_samples: u64) {
     if let Some(app) = APP_HANDLE.get() {
         let event = tray::TrayStatusEvent {
-            status: match status {
-                tray::TrayStatus::Ok => "ok".to_string(),
-                tray::TrayStatus::Warning => "warning".to_string(),
-                tray::TrayStatus::Error => "error".to_string(),
-                tray::TrayStatus::Disconnected => "disconnected".to_string(),
-            },
+            status,
             latency_ms,
             lost_samples,
         };
