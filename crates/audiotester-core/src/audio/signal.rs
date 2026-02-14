@@ -60,8 +60,10 @@ impl MlsGenerator {
         let mut sequence = Vec::with_capacity(length);
         let mut lfsr: u32 = 1; // Initial state (non-zero)
 
-        // Feedback masks for Galois LFSR (primitive polynomials)
-        // The mask has bits set at the tap positions (excluding the highest bit)
+        // Feedback masks for Galois LFSR (primitive polynomials).
+        // In a Galois LFSR, the mask represents XOR tap positions applied when
+        // the output bit (LSB) is 1. Each mask encodes a maximal-length polynomial
+        // that produces a sequence of 2^order - 1 unique states before repeating.
         // Source: https://docs.xilinx.com/v/u/en-US/xapp052 (Xilinx LFSR reference)
         let mask: u32 = match order {
             2 => 0x3,     // x^2 + x + 1
