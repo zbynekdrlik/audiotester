@@ -163,58 +163,162 @@ async fn auto_configure(engine: EngineHandle) {
     }
 }
 
+/// Calculate exponential backoff delay for reconnection.
+/// Schedule: 500ms -> 1000ms -> 2000ms -> 4000ms -> 5000ms (capped)
+fn calculate_backoff_ms(attempt: u32) -> u64 {
+    let base_ms = 500u64;
+    let max_ms = 5000u64;
+    let exponent = attempt.saturating_sub(1).min(12); // Cap exponent to avoid overflow
+    let delay = base_ms.saturating_mul(2u64.pow(exponent));
+    delay.min(max_ms)
+}
+
+/// Maximum number of reconnection attempts before requiring manual intervention
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
 /// Main monitoring loop - analyzes audio and broadcasts stats
+///
+/// Includes auto-reconnection with exponential backoff. When the audio engine
+/// encounters an error, it will attempt to reconnect up to MAX_RECONNECT_ATTEMPTS
+/// times with exponential backoff. Stats and graph history are preserved during
+/// reconnection (no clear() is called).
 async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(100));
     let mut last_status = tray::TrayStatus::Disconnected;
+    let mut consecutive_failures: u32 = 0;
+    let mut reconnect_in_progress = false;
+    let start_time = std::time::Instant::now();
 
     loop {
         interval.tick().await;
 
+        // Update uptime
+        if let Ok(mut store) = stats.lock() {
+            store.set_uptime(start_time.elapsed().as_secs());
+        }
+
         // Try to analyze
-        if let Ok(Some(result)) = engine.analyze().await {
-            // Record to stats store
-            if let Ok(mut store) = stats.lock() {
-                store.record_latency(result.latency_ms);
-                if result.lost_samples > 0 {
-                    store.record_loss(result.lost_samples as u64);
+        match engine.analyze().await {
+            Ok(Some(result)) => {
+                // Reset failure counter on successful analysis
+                if consecutive_failures > 0 {
+                    tracing::info!(
+                        "Audio engine recovered after {} failed attempts",
+                        consecutive_failures
+                    );
+
+                    // Record successful reconnection
+                    if reconnect_in_progress {
+                        if let Ok(mut store) = stats.lock() {
+                            store.record_disconnection((consecutive_failures as u64) * 500, true);
+                        }
+                        reconnect_in_progress = false;
+                    }
                 }
-                if result.corrupted_samples > 0 {
-                    store.record_corruption(result.corrupted_samples as u64);
+                consecutive_failures = 0;
+
+                // Record to stats store (preserve existing data - no clear!)
+                if let Ok(mut store) = stats.lock() {
+                    store.record_latency(result.latency_ms);
+                    if result.lost_samples > 0 {
+                        store.record_loss(result.lost_samples as u64);
+                    }
+                    if result.corrupted_samples > 0 {
+                        store.record_corruption(result.corrupted_samples as u64);
+                    }
+                }
+
+                // Broadcast to WebSocket clients
+                audiotester_server::ws::broadcast_stats(&state);
+
+                // Update tray icon status (only if changed to reduce overhead)
+                let new_status = tray::status_from_analysis(
+                    result.latency_ms,
+                    result.lost_samples as u64,
+                    result.corrupted_samples as u64,
+                );
+
+                if new_status != last_status {
+                    last_status = new_status;
+                    emit_tray_status(new_status, result.latency_ms, result.lost_samples as u64);
                 }
             }
+            Ok(None) => {
+                // No result yet (engine might be stopped or warming up)
+            }
+            Err(e) => {
+                // Engine error - attempt reconnection
+                consecutive_failures += 1;
+                reconnect_in_progress = true;
 
-            // Broadcast to WebSocket clients
-            audiotester_server::ws::broadcast_stats(&state);
+                if consecutive_failures <= MAX_RECONNECT_ATTEMPTS {
+                    let backoff = calculate_backoff_ms(consecutive_failures);
+                    tracing::warn!(
+                        attempt = consecutive_failures,
+                        max = MAX_RECONNECT_ATTEMPTS,
+                        backoff_ms = backoff,
+                        error = %e,
+                        "Audio engine error, attempting reconnection"
+                    );
 
-            // Update tray icon status (only if changed to reduce overhead)
-            let new_status = tray::status_from_analysis(
-                result.latency_ms,
-                result.lost_samples as u64,
-                result.corrupted_samples as u64,
-            );
+                    // Update tray to disconnected
+                    if last_status != tray::TrayStatus::Disconnected {
+                        last_status = tray::TrayStatus::Disconnected;
+                        emit_tray_status(tray::TrayStatus::Disconnected, 0.0, 0);
+                    }
 
-            if new_status != last_status {
-                last_status = new_status;
+                    // Wait with exponential backoff before next attempt
+                    tokio::time::sleep(Duration::from_millis(backoff)).await;
 
-                // Emit tray status event if app handle is available
-                if let Some(app) = APP_HANDLE.get() {
-                    let event = tray::TrayStatusEvent {
-                        status: match new_status {
-                            tray::TrayStatus::Ok => "ok".to_string(),
-                            tray::TrayStatus::Warning => "warning".to_string(),
-                            tray::TrayStatus::Error => "error".to_string(),
-                            tray::TrayStatus::Disconnected => "disconnected".to_string(),
-                        },
-                        latency_ms: result.latency_ms,
-                        lost_samples: result.lost_samples as u64,
-                    };
+                    // Try to restart the engine
+                    match engine.start().await {
+                        Ok(()) => {
+                            tracing::info!(
+                                attempt = consecutive_failures,
+                                "Audio engine reconnected successfully"
+                            );
+                        }
+                        Err(restart_err) => {
+                            tracing::error!(
+                                attempt = consecutive_failures,
+                                error = %restart_err,
+                                "Failed to restart audio engine"
+                            );
+                        }
+                    }
+                } else if consecutive_failures == MAX_RECONNECT_ATTEMPTS + 1 {
+                    // Only log once when max attempts exceeded
+                    tracing::error!(
+                        "Max reconnection attempts ({}) exceeded. Manual intervention required.",
+                        MAX_RECONNECT_ATTEMPTS
+                    );
 
-                    if let Err(e) = app.emit("tray-status", event) {
-                        tracing::warn!("Failed to emit tray status event: {}", e);
+                    // Record failed reconnection
+                    if let Ok(mut store) = stats.lock() {
+                        store.record_disconnection((MAX_RECONNECT_ATTEMPTS as u64) * 5000, false);
                     }
                 }
             }
+        }
+    }
+}
+
+/// Emit a tray status event to update the system tray icon
+fn emit_tray_status(status: tray::TrayStatus, latency_ms: f64, lost_samples: u64) {
+    if let Some(app) = APP_HANDLE.get() {
+        let event = tray::TrayStatusEvent {
+            status: match status {
+                tray::TrayStatus::Ok => "ok".to_string(),
+                tray::TrayStatus::Warning => "warning".to_string(),
+                tray::TrayStatus::Error => "error".to_string(),
+                tray::TrayStatus::Disconnected => "disconnected".to_string(),
+            },
+            latency_ms,
+            lost_samples,
+        };
+
+        if let Err(e) = app.emit("tray-status", event) {
+            tracing::warn!("Failed to emit tray status event: {}", e);
         }
     }
 }

@@ -31,6 +31,32 @@ pub struct StatsResponse {
     pub measurement_count: u64,
     pub latency_history: Vec<(f64, f64)>,
     pub loss_history: Vec<(f64, f64)>,
+    /// Active device name (if any)
+    pub device_name: Option<String>,
+    /// Current buffer size
+    pub buffer_size: u32,
+    /// Current sample rate
+    pub sample_rate: u32,
+    /// Uptime in seconds
+    pub uptime_seconds: u64,
+    /// Loss events with timestamps for visualization
+    pub loss_events: Vec<LossEventResponse>,
+}
+
+/// Loss event response for API
+#[derive(Serialize, Clone)]
+pub struct LossEventResponse {
+    /// Timestamp as ISO 8601 string
+    pub timestamp: String,
+    /// Number of samples lost
+    pub count: u64,
+}
+
+/// Reset response
+#[derive(Serialize)]
+pub struct ResetResponse {
+    pub success: bool,
+    pub message: String,
 }
 
 /// Device info response
@@ -85,11 +111,30 @@ pub async fn get_status(
 
 /// GET /api/v1/stats
 pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
-    let store = state.stats.lock().unwrap();
-    let stats = store.stats().clone();
-    let latency_history = store.latency_plot_data(300);
-    let loss_history = store.loss_plot_data(300);
-    drop(store);
+    // Extract stats from lock in a block so MutexGuard is dropped before .await
+    let (stats, latency_history, loss_history, loss_events) = {
+        let store = state.stats.lock().unwrap();
+        let stats = store.stats().clone();
+        let latency_history = store.latency_plot_data(300);
+        let loss_history = store.loss_plot_data(300);
+        let loss_events: Vec<LossEventResponse> = store
+            .loss_events()
+            .iter()
+            .rev()
+            .take(100)
+            .map(|e| LossEventResponse {
+                timestamp: e.timestamp.to_rfc3339(),
+                count: e.count,
+            })
+            .collect();
+        (stats, latency_history, loss_history, loss_events)
+    };
+
+    // Get device info from engine (safe to await now, no lock held)
+    let (device_name, sample_rate) = match state.engine.get_status().await {
+        Ok(status) => (status.device_name, status.sample_rate),
+        Err(_) => (None, 0),
+    };
 
     Json(StatsResponse {
         current_latency: stats.current_latency,
@@ -105,7 +150,30 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
         measurement_count: stats.measurement_count,
         latency_history,
         loss_history,
+        device_name,
+        buffer_size: 0, // ASIO buffer size not yet exposed from cpal
+        sample_rate,
+        uptime_seconds: stats.uptime_seconds,
+        loss_events,
     })
+}
+
+/// POST /api/v1/reset
+///
+/// Resets statistics counters (min/max/avg/totals) without clearing graph history.
+pub async fn reset_stats(State(state): State<AppState>) -> Json<ResetResponse> {
+    if let Ok(mut store) = state.stats.lock() {
+        store.reset_counters();
+        Json(ResetResponse {
+            success: true,
+            message: "Counters reset successfully. Graph history preserved.".to_string(),
+        })
+    } else {
+        Json(ResetResponse {
+            success: false,
+            message: "Failed to acquire lock on stats store.".to_string(),
+        })
+    }
 }
 
 /// GET /api/v1/devices
@@ -274,9 +342,16 @@ mod tests {
             measurement_count: 100,
             latency_history: vec![(-1.0, 5.0), (-2.0, 5.1)],
             loss_history: vec![],
+            device_name: Some("Test ASIO".to_string()),
+            buffer_size: 256,
+            sample_rate: 96000,
+            uptime_seconds: 3600,
+            loss_events: vec![],
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"current_latency\":5.0"));
+        assert!(json.contains("\"device_name\":\"Test ASIO\""));
+        assert!(json.contains("\"sample_rate\":96000"));
     }
 
     #[test]

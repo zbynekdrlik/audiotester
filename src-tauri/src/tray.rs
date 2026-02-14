@@ -88,6 +88,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let status_item = MenuItem::with_id(app, "status", "Status: Starting...", false, None::<&str>)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
     let dashboard_item = MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
+    let remote_item = MenuItem::with_id(app, "remote", "Remote Access URL", true, None::<&str>)?;
     let separator2 = PredefinedMenuItem::separator(app)?;
     let toggle_item = MenuItem::with_id(app, "toggle", "Stop Monitoring", true, None::<&str>)?;
     let separator3 = PredefinedMenuItem::separator(app)?;
@@ -99,6 +100,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             &status_item,
             &separator1,
             &dashboard_item,
+            &remote_item,
             &separator2,
             &toggle_item,
             &separator3,
@@ -108,7 +110,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let icon = make_status_icon(TrayStatus::Disconnected);
 
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id("main")
         .icon(icon)
         .tooltip("Audiotester - Audio Monitor")
         .menu(&menu)
@@ -117,6 +119,9 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             match id {
                 "dashboard" => {
                     open_dashboard(app);
+                }
+                "remote" => {
+                    show_remote_url(app);
                 }
                 "toggle" => {
                     tracing::info!("Toggle monitoring requested from tray");
@@ -145,6 +150,20 @@ fn open_dashboard(app: &AppHandle) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+/// Show the remote access URL in the log (for clipboard)
+fn show_remote_url(_app: &AppHandle) {
+    let port = 8920;
+    // Get the machine's hostname for LAN access
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "localhost".to_string());
+    let url = format!("http://{}:{}", hostname, port);
+    tracing::info!("Remote access URL: {}", url);
+    // In a full implementation, this would copy to clipboard
+    // For now, log it so the user can see it in the console
 }
 
 /// Create an RGBA icon for the given status

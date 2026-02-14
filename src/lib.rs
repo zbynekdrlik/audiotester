@@ -15,7 +15,7 @@ pub use audiotester_core::audio;
 pub use audiotester_core::stats;
 
 // Primary exports - burst-based latency system
-pub use audiotester_core::AudioEngine;
+pub use audiotester_core::{AudioEngine, ConnectionState};
 pub use audiotester_core::{BurstDetector, BurstEvent, BurstGenerator};
 pub use audiotester_core::{LatencyAnalyzer, LatencyResult};
 
@@ -26,7 +26,7 @@ pub use audiotester_core::Analyzer;
 pub use audiotester_core::MlsGenerator;
 
 // Statistics
-pub use audiotester_core::StatsStore;
+pub use audiotester_core::{DisconnectionEvent, LossEvent, StatsStore};
 
 // Constants
 pub use audiotester_core::{BURST_CYCLE_MS, BURST_DURATION_MS};

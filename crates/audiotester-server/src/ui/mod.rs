@@ -18,6 +18,9 @@ pub const DASHBOARD_SCRIPT: &str = include_str!("scripts/dashboard.js");
 /// JavaScript for settings page interactivity
 pub const SETTINGS_SCRIPT: &str = include_str!("scripts/settings.js");
 
+/// PWA manifest JSON
+pub const MANIFEST_JSON: &str = include_str!("manifest.json");
+
 /// Escape </script> tags in embedded content
 pub fn escape_script_tag(s: &str) -> String {
     s.replace("</script>", r#"<\/script>"#)

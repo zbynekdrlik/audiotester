@@ -38,6 +38,32 @@ Windows ASIO audio testing application for monitoring professional audio paths (
 - Use `thiserror` for custom error types, `anyhow` for application errors
 - Prefer `tracing` over `println!` for logging
 
+## TDD Mandatory Process
+
+Every feature MUST follow this strict TDD workflow:
+
+1. **Write failing tests FIRST** - Create the test file before any implementation
+2. **Run tests to verify they fail** - Tests must fail for the right reasons (compilation errors for missing types/functions are acceptable failures)
+3. **Implement minimal code** - Write only enough code to make tests pass
+4. **Refactor** - Clean up while keeping tests green
+5. **Never skip tests** - No `#[ignore]` without explicit approval
+
+### Test File Naming Convention
+
+| Test Type   | File Pattern             | Example                           |
+| ----------- | ------------------------ | --------------------------------- |
+| E2E         | `tests/e2e_*.rs`         | `tests/e2e_tray.rs`               |
+| Integration | `tests/integration/*.rs` | `tests/integration/audio_loop.rs` |
+| Unit        | Inside `mod tests`       | `#[cfg(test)] mod tests { ... }`  |
+
+### TDD Commit Pattern
+
+```
+git commit -m "test: add e2e tests for feature X"   # RED phase
+git commit -m "feat: implement feature X"            # GREEN phase
+git commit -m "refactor: clean up feature X"         # REFACTOR phase
+```
+
 ## Strict CI/CD Requirements
 
 ### Zero Tolerance Policy

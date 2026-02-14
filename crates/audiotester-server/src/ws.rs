@@ -19,6 +19,16 @@ fn build_stats_json(state: &AppState) -> Option<String> {
     let stats = store.stats().clone();
     let latency_history = store.latency_plot_data(300);
     let loss_history = store.loss_plot_data(300);
+    let loss_events: Vec<crate::api::LossEventResponse> = store
+        .loss_events()
+        .iter()
+        .rev()
+        .take(100)
+        .map(|e| crate::api::LossEventResponse {
+            timestamp: e.timestamp.to_rfc3339(),
+            count: e.count,
+        })
+        .collect();
     drop(store);
 
     let response = crate::api::StatsResponse {
@@ -35,6 +45,11 @@ fn build_stats_json(state: &AppState) -> Option<String> {
         measurement_count: stats.measurement_count,
         latency_history,
         loss_history,
+        device_name: None,
+        buffer_size: 0,
+        sample_rate: 0,
+        uptime_seconds: stats.uptime_seconds,
+        loss_events,
     };
     serde_json::to_string(&response).ok()
 }

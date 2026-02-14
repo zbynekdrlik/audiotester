@@ -82,6 +82,20 @@ pub enum EngineState {
     Error,
 }
 
+/// Connection state for auto-reconnection tracking
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Connected and operating normally
+    Connected,
+    /// Disconnected, attempting to reconnect
+    Reconnecting {
+        /// Current reconnect attempt number (1-based)
+        attempt: u32,
+    },
+    /// Reconnection failed after max attempts, requires manual intervention
+    Failed,
+}
+
 /// Analysis results from comparing sent and received signals
 ///
 /// Compatible with previous MLS-based interface for backward compatibility.

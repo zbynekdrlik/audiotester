@@ -1,6 +1,12 @@
 //! Dashboard page - Leptos SSR
 //!
 //! Main statistics dashboard showing real-time latency and loss data.
+//! Features:
+//! - Summary bar with current/min/max/avg latency and loss counters
+//! - Device info bar showing active device, sample rate, uptime
+//! - Reset button for counters (preserves graph history)
+//! - Flexbox no-scroll layout (height: 100vh)
+//! - PWA-ready meta tags
 
 use super::components::summary_bar::SummaryBar;
 use super::{DASHBOARD_SCRIPT, DASHBOARD_STYLES};
@@ -17,7 +23,11 @@ fn DashboardPage() -> impl IntoView {
         <html lang="en">
             <head>
                 <meta charset="utf-8"/>
-                <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+                <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+                <meta name="apple-mobile-web-app-capable" content="yes"/>
+                <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+                <meta name="theme-color" content="#1a1a2e"/>
+                <link rel="manifest" href="/manifest.json"/>
                 <title>"Audiotester - Dashboard"</title>
                 <style>{DASHBOARD_STYLES}</style>
             </head>
@@ -32,6 +42,21 @@ fn DashboardPage() -> impl IntoView {
                 </header>
                 <main>
                     <SummaryBar/>
+                    <div class="device-info-bar" id="device-info-bar">
+                        <div class="info-item">
+                            <span class="info-label">"Device:"</span>
+                            <span class="info-value" id="device-name">"--"</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">"Sample Rate:"</span>
+                            <span class="info-value" id="sample-rate-display">"--"</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">"Uptime:"</span>
+                            <span class="info-value" id="uptime-display">"--"</span>
+                        </div>
+                        <button class="btn-reset" id="reset-btn" title="Reset counters (preserves graph history)">"Reset"</button>
+                    </div>
                     <section class="charts">
                         <div class="chart-container">
                             <h2>"Latency History"</h2>
