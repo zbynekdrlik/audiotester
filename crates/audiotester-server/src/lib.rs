@@ -251,6 +251,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::post(api::toggle_monitoring),
         )
         .route("/api/v1/reset", axum::routing::post(api::reset_stats))
+        .route(
+            "/api/v1/remote-url",
+            axum::routing::get(api::get_remote_url),
+        )
         // WebSocket
         .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
         // PWA manifest

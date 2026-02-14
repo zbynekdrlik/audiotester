@@ -45,6 +45,8 @@ pub struct StatsResponse {
     pub samples_sent: u64,
     /// Total samples received since reset
     pub samples_received: u64,
+    /// True when no signal is being received (analysis timeout)
+    pub signal_lost: bool,
 }
 
 /// Loss event response for API
@@ -86,6 +88,12 @@ pub struct ConfigResponse {
 pub struct ConfigUpdate {
     pub device: Option<String>,
     pub sample_rate: Option<u32>,
+}
+
+/// Remote URL response
+#[derive(Serialize)]
+pub struct RemoteUrlResponse {
+    pub url: String,
 }
 
 /// Monitoring toggle request
@@ -161,6 +169,7 @@ pub async fn get_stats(State(state): State<AppState>) -> Json<StatsResponse> {
         loss_events,
         samples_sent: stats.samples_sent,
         samples_received: stats.samples_received,
+        signal_lost: stats.signal_lost,
     })
 }
 
@@ -275,6 +284,18 @@ pub async fn update_config(
     }))
 }
 
+/// GET /api/v1/remote-url
+///
+/// Returns the remote access URL for accessing the dashboard from other devices.
+pub async fn get_remote_url() -> Json<RemoteUrlResponse> {
+    let ip = local_ip_address::local_ip()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|_| "localhost".to_string());
+    Json(RemoteUrlResponse {
+        url: format!("http://{}:8920", ip),
+    })
+}
+
 /// POST /api/v1/monitoring
 pub async fn toggle_monitoring(
     State(state): State<AppState>,
@@ -355,6 +376,7 @@ mod tests {
             loss_events: vec![],
             samples_sent: 1000000,
             samples_received: 999950,
+            signal_lost: false,
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"current_latency\":5.0"));
@@ -362,6 +384,7 @@ mod tests {
         assert!(json.contains("\"sample_rate\":96000"));
         assert!(json.contains("\"samples_sent\":1000000"));
         assert!(json.contains("\"samples_received\":999950"));
+        assert!(json.contains("\"signal_lost\":false"));
     }
 
     #[test]
