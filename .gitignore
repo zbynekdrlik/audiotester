@@ -33,6 +33,8 @@ logs/
 
 # Test artifacts
 test-output/
+test-results/
+playwright-report/
 coverage/
 
 # Release artifacts

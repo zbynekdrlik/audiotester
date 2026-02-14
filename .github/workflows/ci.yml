@@ -46,7 +46,7 @@ jobs:
   main-sync:
     name: Main Sync Check
     runs-on: windows-latest
-    if: github.ref == 'refs/heads/dev'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,6 +135,22 @@ jobs:
       - name: Run integration tests
         run: cargo test --test '*' --verbose
 
+  security-audit:
+    name: Security Audit
+    runs-on: windows-latest
+    needs: [fmt]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Run security audit
+        run: cargo audit
+
   e2e:
     name: E2E Tests
     runs-on: windows-latest
@@ -188,6 +204,11 @@ jobs:
             fi
             sleep 1
           done
+          # Verify server actually started
+          if ! curl -s http://127.0.0.1:8920/api/v1/status > /dev/null 2>&1; then
+            echo "::error::Test server failed to start within 30s"
+            exit 1
+          fi
 
       - name: Run Playwright tests
         run: npx playwright test --reporter=list
@@ -287,7 +308,7 @@ jobs:
 
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+            "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ${{ secrets.IEM_USER }} /F /IT"
 
       - name: Start application
         env:
@@ -369,11 +390,11 @@ jobs:
           echo "Latency: ${LATENCY}ms, Lost in 10s: $LOST_DIFF"
 
           # Latency must be stable and bounded (not cycling 0→341→682ms)
-          # Accept up to 100ms for VASIO-8 loopback with system variation
-          if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 100) ? 0 : 1}'; then
-            echo "Latency is in expected loopback range (0-100ms)"
+          # Accept up to 50ms for VASIO-8 loopback (matches auto-release threshold)
+          if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 50) ? 0 : 1}'; then
+            echo "Latency is in expected loopback range (0-50ms)"
           else
-            echo "::error::Latency ${LATENCY}ms is outside expected range (0-100ms)"
+            echo "::error::Latency ${LATENCY}ms is outside expected range (0-50ms)"
             echo "::error::If > 300ms, correlation aliasing may be occurring"
             exit 1
           fi
@@ -396,6 +417,7 @@ jobs:
         clippy,
         build,
         test,
+        security-audit,
         e2e,
         playwright,
         build-dev,
@@ -422,6 +444,7 @@ jobs:
           echo "  build: ${{ needs.build.result }}"
           echo "  test: ${{ needs.test.result }}"
           echo "  e2e: ${{ needs.e2e.result }}"
+          echo "  security-audit: ${{ needs.security-audit.result }}"
           echo "  playwright: ${{ needs.playwright.result }}"
           echo "  build-dev: ${{ needs.build-dev.result }}"
           echo "  deploy-dev: ${{ needs.deploy-dev.result }}"
@@ -433,6 +456,7 @@ jobs:
              [[ "${{ needs.clippy.result }}" != "success" ]] || \
              [[ "${{ needs.build.result }}" != "success" ]] || \
              [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.security-audit.result }}" != "success" ]] || \
              [[ "${{ needs.e2e.result }}" != "success" ]] || \
              [[ "${{ needs.playwright.result }}" != "success" ]]; then
             echo "::error::Core CI jobs failed - cannot merge"
