@@ -127,12 +127,13 @@ pub fn run() {
 /// `AUDIOTESTER_AUTO_START` to set up the audio engine without
 /// manual web UI interaction.
 async fn auto_configure(engine: EngineHandle) {
-    // Wait for ASIO subsystem to initialize
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    // Wait for ASIO subsystem to initialize after boot/reboot
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Set sample rate if specified
+    // Set sample rate if specified (trim to handle batch file whitespace)
     if let Ok(rate_str) = std::env::var("AUDIOTESTER_SAMPLE_RATE") {
-        if let Ok(rate) = rate_str.parse::<u32>() {
+        let trimmed = rate_str.trim();
+        if let Ok(rate) = trimmed.parse::<u32>() {
             tracing::info!(sample_rate = rate, "Auto-configuring sample rate");
             engine.set_sample_rate(rate).await;
         } else {
@@ -140,36 +141,57 @@ async fn auto_configure(engine: EngineHandle) {
         }
     }
 
-    // Select device with retries
-    if let Ok(device_name) = std::env::var("AUDIOTESTER_DEVICE") {
+    let device_name = std::env::var("AUDIOTESTER_DEVICE").ok();
+    let auto_start = std::env::var("AUDIOTESTER_AUTO_START")
+        .map(|v| v.trim() == "true" || v.trim() == "1")
+        .unwrap_or(false);
+
+    if let Some(ref device_name) = device_name {
         tracing::info!(device = %device_name, "Auto-configuring device");
-        let mut selected = false;
-        for attempt in 1..=5 {
+
+        // Select device and start monitoring with retries
+        // After reboot, ASIO drivers may need time to fully initialize,
+        // so we retry the full select+start cycle
+        for attempt in 1..=10 {
+            // Re-select device each attempt (fresh ASIO host handle)
             match engine.select_device(device_name.clone()).await {
                 Ok(()) => {
                     tracing::info!(device = %device_name, attempt, "Device selected");
-                    selected = true;
-                    break;
+
+                    if auto_start {
+                        match engine.start().await {
+                            Ok(()) => {
+                                tracing::info!(attempt, "Monitoring started successfully");
+                                return;
+                            }
+                            Err(e) => {
+                                tracing::warn!(attempt, error = %e, "Monitoring start failed, will retry...");
+                                // Stop to clean up any partial state
+                                let _ = engine.stop().await;
+                            }
+                        }
+                    } else {
+                        return;
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(device = %device_name, attempt, error = %e, "Device selection failed, retrying...");
-                    tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
+
+            // Exponential backoff: 2s, 2s, 3s, 4s, 5s, 5s, 5s, 5s, 5s, 5s
+            let delay = match attempt {
+                1..=2 => 2,
+                3 => 3,
+                4 => 4,
+                _ => 5,
+            };
+            tokio::time::sleep(Duration::from_secs(delay)).await;
         }
 
-        if !selected {
-            tracing::error!(device = %device_name, "Failed to select device after 5 attempts");
-            return;
-        }
-    }
-
-    // Auto-start monitoring if requested
-    if std::env::var("AUDIOTESTER_AUTO_START")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false)
-    {
-        tracing::info!("Auto-starting monitoring");
+        tracing::error!(device = %device_name, "Failed to auto-configure after 10 attempts");
+    } else if auto_start {
+        tracing::info!("Auto-starting monitoring (no device specified)");
         match engine.start().await {
             Ok(()) => tracing::info!("Monitoring started successfully"),
             Err(e) => tracing::error!(error = %e, "Failed to auto-start monitoring"),
