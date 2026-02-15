@@ -300,7 +300,7 @@ jobs:
           SSHPASS: ${{ secrets.IEM_PASSWORD }}
         run: |
           # Create start.bat locally then scp to remote
-          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VB-Matrix VASIO-8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nC:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
+          printf '@echo off\r\nset AUDIOTESTER_DEVICE=VB-Matrix VASIO-8\r\nset AUDIOTESTER_SAMPLE_RATE=96000\r\nset AUDIOTESTER_AUTO_START=true\r\nset RUST_LOG=audiotester=info\r\nstart "" /B C:\\Users\\iem\\audiotester\\audiotester.exe\r\n' > /tmp/start.bat
 
           sshpass -e scp -o StrictHostKeyChecking=no \
             /tmp/start.bat \
@@ -309,6 +309,14 @@ jobs:
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
             "schtasks /Delete /TN audiotester /F 2>nul & schtasks /Create /TN audiotester /TR \"C:\Users\iem\audiotester\start.bat\" /SC ONLOGON /RU ableton-pc /F /IT"
+
+      - name: Create Start Menu shortcut
+        env:
+          SSHPASS: ${{ secrets.IEM_PASSWORD }}
+        run: |
+          sshpass -e ssh -o StrictHostKeyChecking=no \
+            "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
+            "powershell -Command \"\$ws = New-Object -ComObject WScript.Shell; \$s = \$ws.CreateShortcut([Environment]::GetFolderPath('StartMenu') + '\\Programs\\Audiotester.lnk'); \$s.TargetPath = 'C:\\Users\\iem\\audiotester\\start.bat'; \$s.WorkingDirectory = 'C:\\Users\\iem\\audiotester'; \$s.Description = 'ASIO Audio Testing Application'; \$s.IconLocation = 'C:\\Users\\iem\\audiotester\\audiotester.exe,0'; \$s.WindowStyle = 7; \$s.Save()\""
 
       - name: Start application
         env:

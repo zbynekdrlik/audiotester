@@ -9,7 +9,7 @@ use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager, WindowEvent};
 
 /// Global AppHandle storage for cross-thread tray updates
 static APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -89,6 +89,12 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_shell::init())
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .setup(|app| {
             let handle = app.handle().clone();
 
