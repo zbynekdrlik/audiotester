@@ -24,14 +24,33 @@ pub fn run() {
         tracing::error!("PANIC: {}", info);
     }));
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("audiotester=info".parse().unwrap()),
-        )
+    // Initialize file-based logging with daily rotation
+    let log_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("audiotester")
+        .join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "audiotester.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false);
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("audiotester=debug".parse().unwrap())
+        .add_directive("audiotester_core=debug".parse().unwrap())
+        .add_directive("audiotester_server=info".parse().unwrap());
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
         .init();
 
+    tracing::info!(log_dir = %log_dir.display(), "Logging initialized");
     tracing::info!("Starting Audiotester v{}", audiotester_core::VERSION);
 
     // Set process priority to HIGH for audio stability (prevents ASIO callback starvation
@@ -57,7 +76,7 @@ pub fn run() {
     let stats = Arc::new(Mutex::new(StatsStore::new()));
 
     let config = ServerConfig::default();
-    let state = AppState::new(engine.clone(), Arc::clone(&stats), config);
+    let state = AppState::new(engine.clone(), Arc::clone(&stats), config, Some(log_dir));
 
     // Single Tokio runtime for all async tasks
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -316,15 +335,19 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
                     // Reset signal_lost if it was set
                     if signal_lost {
+                        let lost_duration = signal_lost_since
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or(0);
                         signal_lost = false;
                         signal_lost_since = None;
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
                         tracing::info!(
-                            "Signal restored (latency: {:.2}ms, confidence: {:.2})",
-                            result.latency_ms,
-                            result.confidence
+                            latency_ms = %format!("{:.6}", result.latency_ms),
+                            confidence = %format!("{:.3}", result.confidence),
+                            lost_duration_ms = lost_duration,
+                            "signal_recovered"
                         );
                     }
                 } else if !signal_lost {
@@ -335,9 +358,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         store.set_signal_lost(true);
                     }
                     tracing::warn!(
-                        "No signal detected (latency: {:.2}ms, confidence: {:.2})",
-                        result.latency_ms,
-                        result.confidence
+                        latency_ms = %format!("{:.6}", result.latency_ms),
+                        confidence = %format!("{:.3}", result.confidence),
+                        "signal_lost"
                     );
                 }
 
@@ -366,6 +389,12 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 if let Ok(mut store) = stats.lock() {
                     store.record_latency(result.latency_ms);
                     store.set_confidence(result.confidence);
+                    tracing::debug!(
+                        latency_ms = %format!("{:.6}", result.latency_ms),
+                        confidence = %format!("{:.3}", result.confidence),
+                        lost = result.lost_samples,
+                        "stats_recorded"
+                    );
                     if result.lost_samples > 0 {
                         store.record_loss(result.lost_samples as u64);
                     }

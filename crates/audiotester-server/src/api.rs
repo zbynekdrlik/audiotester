@@ -392,6 +392,59 @@ pub async fn toggle_monitoring(
     }))
 }
 
+/// Query parameters for GET /api/v1/logs
+#[derive(Deserialize)]
+pub struct LogsQuery {
+    /// Number of lines from end (default 200)
+    pub tail: Option<usize>,
+    /// Filter by keyword (optional)
+    pub filter: Option<String>,
+}
+
+/// GET /api/v1/logs
+///
+/// Returns recent log file content for diagnostic analysis.
+pub async fn get_logs(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<LogsQuery>,
+) -> Result<String, (StatusCode, String)> {
+    let log_dir = state
+        .log_dir
+        .as_ref()
+        .ok_or((StatusCode::NOT_FOUND, "Logging not configured".to_string()))?;
+
+    // Find the most recent log file
+    let mut entries: Vec<_> = std::fs::read_dir(log_dir)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .to_str()
+                .map(|s| s.contains("audiotester.log"))
+                .unwrap_or(false)
+        })
+        .collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+
+    let log_file = entries
+        .first()
+        .ok_or((StatusCode::NOT_FOUND, "No log files found".to_string()))?;
+
+    let content = std::fs::read_to_string(log_file.path())
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    let tail = query.tail.unwrap_or(200);
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(tail);
+    let mut result: Vec<&str> = lines[start..].to_vec();
+
+    if let Some(ref filter) = query.filter {
+        result.retain(|line| line.contains(filter.as_str()));
+    }
+
+    Ok(result.join("\n"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

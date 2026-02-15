@@ -660,18 +660,26 @@ impl AudioEngine {
         let detection_event_rx = self.detection_event_rx.as_ref()?;
 
         // Register any pending burst events from output callback
+        let mut burst_count = 0usize;
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
             while let Ok(event) = burst_event_rx.try_recv() {
                 latency_analyzer.register_burst(event);
+                burst_count += 1;
             }
         }
 
         // Process detection events from input callback using frame-based matching
         let mut result = AnalysisResult::default();
         let mut had_detection = false;
+        let mut detection_count = 0usize;
 
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
             while let Ok(detection) = detection_event_rx.try_recv() {
+                detection_count += 1;
+                tracing::trace!(
+                    input_frame = detection.input_frame,
+                    "detection_event_received"
+                );
                 // Frame-based matching - simple arithmetic, no timestamps!
                 if let Some(latency_result) = latency_analyzer.match_detection(&detection) {
                     result = latency_result.into();
@@ -694,6 +702,14 @@ impl AudioEngine {
                     result.is_healthy = result.confidence > 0.3;
                 }
             }
+        }
+
+        if burst_count > 0 || detection_count > 0 {
+            tracing::trace!(
+                burst_events = burst_count,
+                detection_events = detection_count,
+                "analyze_cycle"
+            );
         }
 
         // Frame-based loss detection from counter channel (pre-allocated buffer)

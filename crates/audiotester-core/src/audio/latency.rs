@@ -126,7 +126,13 @@ impl LatencyAnalyzer {
             self.pending_bursts.pop_front();
         }
 
+        let frame = event.start_frame;
         self.pending_bursts.push_back(event);
+        tracing::trace!(
+            frame = frame,
+            pending = self.pending_bursts.len(),
+            "burst_registered"
+        );
     }
 
     /// Match a detection event with a pending burst using frame arithmetic
@@ -158,9 +164,18 @@ impl LatencyAnalyzer {
         if let Some(i) = matched_index {
             let burst = self.pending_bursts.remove(i).unwrap();
             // Discard all older bursts (they're stale)
-            self.pending_bursts
-                .drain(..i.min(self.pending_bursts.len()));
+            let drain_count = i.min(self.pending_bursts.len());
+            self.pending_bursts.drain(..drain_count);
             let result = self.calculate_latency_from_frames(&burst, detection);
+            tracing::debug!(
+                detection_frame = detection.input_frame,
+                burst_frame = burst.start_frame,
+                frame_diff = detection.input_frame - burst.start_frame,
+                latency_ms = %format!("{:.6}", result.latency_ms),
+                pending_after = self.pending_bursts.len(),
+                measurement = self.measurement_count,
+                "latency_matched"
+            );
             self.last_result = Some(result.clone());
             return Some(result);
         }
@@ -169,6 +184,12 @@ impl LatencyAnalyzer {
         self.pending_bursts.retain(|b| {
             detection.input_frame.saturating_sub(b.start_frame) < max_latency_frames * 2
         });
+
+        tracing::trace!(
+            detection_frame = detection.input_frame,
+            pending_count = self.pending_bursts.len(),
+            "no_burst_match"
+        );
 
         None
     }
