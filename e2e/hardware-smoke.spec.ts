@@ -4,6 +4,7 @@ import {
   reconnectVasio8Loopback,
   isVbanTextAvailable,
   queryProperty,
+  restartAudioEngine,
 } from "./helpers/vban-text";
 
 // These tests only run when AUDIOTESTER_HARDWARE_TEST=true
@@ -128,6 +129,104 @@ test.describe("Hardware Smoke Tests", () => {
     expect(typeof body.confidence).toBe("number");
     // With active loopback, confidence should be high
     expect(body.confidence).toBeGreaterThan(0.3);
+  });
+});
+
+test.describe("Stop/Start Recovery (Issue #30)", () => {
+  test.skip(!isHardwareTest, "Requires AUDIOTESTER_HARDWARE_TEST=true");
+
+  test("stop and restart monitoring recovers signal", async ({ request }) => {
+    // Verify signal OK initially
+    const before = await request.get("/api/v1/stats");
+    const beforeStats = await before.json();
+    expect(beforeStats.signal_lost).toBe(false);
+    expect(beforeStats.current_latency).toBeGreaterThan(0);
+    expect(beforeStats.current_latency).toBeLessThan(50);
+
+    // Stop monitoring
+    await request.post("/api/v1/monitoring", { data: { enabled: false } });
+    await new Promise((r) => setTimeout(r, 2000));
+
+    // Start monitoring - must recover with fresh ASIO handle
+    const startResp = await request.post("/api/v1/monitoring", {
+      data: { enabled: true },
+    });
+    expect(startResp.ok()).toBeTruthy();
+
+    // Wait for signal recovery (up to 10s)
+    let recovered = false;
+    for (let i = 0; i < 20; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (
+        !stats.signal_lost &&
+        stats.current_latency > 0 &&
+        stats.current_latency < 50
+      ) {
+        recovered = true;
+        break;
+      }
+    }
+    expect(recovered).toBe(true);
+  });
+});
+
+test.describe("Latency Stability After VBMatrix Restart (Issue #26)", () => {
+  test.skip(!isHardwareTest, "Requires AUDIOTESTER_HARDWARE_TEST=true");
+
+  test("latency stable within 2ms after VBMatrix audio engine restart", async ({
+    request,
+  }) => {
+    // 1. Get baseline latency (average of 5 samples)
+    const baselines: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (stats.current_latency > 0 && stats.current_latency < 50) {
+        baselines.push(stats.current_latency);
+      }
+    }
+    expect(baselines.length).toBeGreaterThan(0);
+    const baselineAvg = baselines.reduce((a, b) => a + b, 0) / baselines.length;
+
+    // 2. Restart VBMatrix audio engine
+    await restartAudioEngine(vbmatrixHost);
+
+    // 3. Wait for auto-reconnection (~15s)
+    let reconnected = false;
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (
+        !stats.signal_lost &&
+        stats.current_latency > 0 &&
+        stats.current_latency < 50
+      ) {
+        reconnected = true;
+        break;
+      }
+    }
+    expect(reconnected).toBe(true);
+
+    // 4. Get post-restart latency (average of 5 samples)
+    const postSamples: number[] = [];
+    for (let i = 0; i < 5; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      if (stats.current_latency > 0 && stats.current_latency < 50) {
+        postSamples.push(stats.current_latency);
+      }
+    }
+    expect(postSamples.length).toBeGreaterThan(0);
+    const postAvg = postSamples.reduce((a, b) => a + b, 0) / postSamples.length;
+
+    // 5. Latency should be within 2ms of baseline
+    const diff = Math.abs(postAvg - baselineAvg);
+    expect(diff).toBeLessThan(2);
   });
 });
 

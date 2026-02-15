@@ -183,6 +183,17 @@ export async function reconnectVasio8Loopback(host: string): Promise<void> {
 }
 
 /**
+ * Restart VBMatrix audio engine via VBAN-TEXT.
+ * Sends Command.Restart = 1; which closes and reopens all ASIO devices.
+ */
+export async function restartAudioEngine(
+  host: string,
+  port?: number,
+): Promise<void> {
+  await sendCommand(host, "Command.Restart = 1;", { port });
+}
+
+/**
  * Check if VBAN-TEXT communication with VBMatrix is working.
  */
 export async function isVbanTextAvailable(host: string): Promise<boolean> {
