@@ -167,10 +167,10 @@ pub struct AudioEngine {
     output_samples: Option<Arc<std::sync::atomic::AtomicUsize>>,
     /// Input sample counter (shared with input callback via Arc)
     input_samples: Option<Arc<std::sync::atomic::AtomicUsize>>,
-    /// Output frame counter (shared with output callback via Arc)
-    output_frame_counter: Option<Arc<AtomicU64>>,
-    /// Input frame counter (shared with input callback via Arc)
-    input_frame_counter: Option<Arc<AtomicU64>>,
+    /// Shared frame counter incremented by output callback, read by input callback.
+    /// Using a single counter eliminates I/O phase offset artifacts that cause
+    /// latency measurement to shift by ~1ms after ASIO driver restarts (issue #26).
+    shared_frame_counter: Option<Arc<AtomicU64>>,
     /// Pre-allocated buffer for counter sample reads
     counter_buffer: Vec<f32>,
 }
@@ -193,8 +193,7 @@ impl AudioEngine {
             running: None,
             output_samples: None,
             input_samples: None,
-            output_frame_counter: None,
-            input_frame_counter: None,
+            shared_frame_counter: None,
             counter_buffer: Vec::new(),
         }
     }
@@ -448,14 +447,16 @@ impl AudioEngine {
 
         // Standalone atomics shared with callbacks via Arc (no SharedState contention)
         let running = Arc::new(AtomicBool::new(true));
-        let output_frame_counter = Arc::new(AtomicU64::new(0));
-        let input_frame_counter = Arc::new(AtomicU64::new(0));
+        // Single shared frame counter: incremented by output callback, read by input callback.
+        // This eliminates I/O phase offset artifacts (issue #26) because both burst generation
+        // and burst detection reference the same monotonic counter.
+        let shared_frame_counter = Arc::new(AtomicU64::new(0));
         let output_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let input_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         // Create output stream - BurstGenerator moved into closure (lock-free)
         let output_running = Arc::clone(&running);
-        let output_counter = Arc::clone(&output_frame_counter);
+        let output_counter = Arc::clone(&shared_frame_counter);
         let output_sample_count = Arc::clone(&output_samples);
         let num_output_channels = output_channels as usize;
         let output_stream = device.build_output_stream(
@@ -515,8 +516,11 @@ impl AudioEngine {
         )?;
 
         // Create input stream - BurstDetector and counter producer moved into closure (lock-free)
+        // Input callback reads the shared_frame_counter (written by output callback)
+        // instead of maintaining its own counter. This eliminates I/O phase offset
+        // artifacts that caused ~1ms latency shifts after ASIO driver restarts (issue #26).
         let input_running = Arc::clone(&running);
-        let input_counter = Arc::clone(&input_frame_counter);
+        let input_shared_counter = Arc::clone(&shared_frame_counter);
         let input_sample_count = Arc::clone(&input_samples);
         let num_input_channels = input_channels as usize;
 
@@ -525,17 +529,19 @@ impl AudioEngine {
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
                 if input_running.load(Ordering::Relaxed) {
                     let frame_count = data.len() / num_input_channels;
-                    let input_frame_start = input_counter.load(Ordering::Acquire);
+                    // Read the shared frame counter (incremented by output callback).
+                    // In ASIO's bufferSwitch, cpal processes output before input,
+                    // so the counter is current when we read it here.
+                    let current_shared_frame = input_shared_counter.load(Ordering::Acquire);
 
                     // Inline burst detection (detector owned by this closure, no Mutex)
                     for (i, frame) in data.chunks(num_input_channels).enumerate() {
                         if !frame.is_empty() {
                             let sample = frame[0];
-                            let current_frame = input_frame_start + i as u64;
 
                             if burst_detector.process(sample, i).is_some() {
                                 let _ = detection_event_tx.try_send(DetectionEvent {
-                                    input_frame: current_frame,
+                                    input_frame: current_shared_frame + i as u64,
                                 });
                             }
                         }
@@ -545,8 +551,6 @@ impl AudioEngine {
                             let _ = counter_producer.try_push(frame[1]);
                         }
                     }
-
-                    input_counter.fetch_add(frame_count as u64, Ordering::Release);
 
                     let prev = input_sample_count.fetch_add(frame_count, Ordering::Relaxed);
                     if prev == 0 {
@@ -590,8 +594,7 @@ impl AudioEngine {
         self.running = Some(running);
         self.output_samples = Some(output_samples);
         self.input_samples = Some(input_samples);
-        self.output_frame_counter = Some(output_frame_counter);
-        self.input_frame_counter = Some(input_frame_counter);
+        self.shared_frame_counter = Some(shared_frame_counter);
         self.counter_buffer = vec![0.0f32; RING_BUFFER_SIZE / 2];
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
@@ -620,8 +623,7 @@ impl AudioEngine {
         self.running = None;
         self.output_samples = None;
         self.input_samples = None;
-        self.output_frame_counter = None;
-        self.input_frame_counter = None;
+        self.shared_frame_counter = None;
         self.counter_buffer = Vec::new();
 
         self.state = EngineState::Stopped;

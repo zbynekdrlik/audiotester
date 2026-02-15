@@ -312,26 +312,54 @@ pub async fn toggle_monitoring(
 
     if req.enabled {
         if current.state != EngineState::Running {
-            // Re-select device to get a fresh ASIO handle before starting.
-            // After reboot or driver restart, the stored handle may be stale.
-            if let Some(ref device) = current.device_name {
-                state
-                    .engine
-                    .select_device(device.clone())
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            format!("Failed to re-select device: {}", e),
-                        )
-                    })?;
+            // Allow ASIO driver time to release resources after stop().
+            // Without this delay, re-selecting the device can fail because
+            // the driver still holds references from the previous session.
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+            // Retry loop: ASIO drivers (especially VBMatrix VASIO-8) may need
+            // multiple attempts to reconnect after stop/start cycles.
+            // Re-select device on each attempt for a fresh ASIO handle.
+            let max_attempts = 3;
+            let mut last_error = String::new();
+            let mut started = false;
+
+            for attempt in 1..=max_attempts {
+                // Re-select device to get a fresh ASIO handle before starting.
+                // After reboot or driver restart, the stored handle may be stale.
+                if let Some(ref device) = current.device_name {
+                    if let Err(e) = state.engine.select_device(device.clone()).await {
+                        last_error =
+                            format!("Failed to re-select device (attempt {}): {}", attempt, e);
+                        tracing::warn!("{}", last_error);
+                        if attempt < max_attempts {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        continue;
+                    }
+                }
+
+                match state.engine.start().await {
+                    Ok(()) => {
+                        if attempt > 1 {
+                            tracing::info!("Monitoring started on attempt {}", attempt);
+                        }
+                        started = true;
+                        break;
+                    }
+                    Err(e) => {
+                        last_error = format!("Failed to start (attempt {}): {}", attempt, e);
+                        tracing::warn!("{}", last_error);
+                        if attempt < max_attempts {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                    }
+                }
             }
-            state.engine.start().await.map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Failed to start: {}", e),
-                )
-            })?;
+
+            if !started {
+                return Err((StatusCode::INTERNAL_SERVER_ERROR, last_error));
+            }
         }
     } else if current.state == EngineState::Running {
         state.engine.stop().await.map_err(|e| {
