@@ -626,6 +626,14 @@ impl AudioEngine {
         self.shared_frame_counter = None;
         self.counter_buffer = Vec::new();
 
+        // Release ASIO host and device references so the driver can be
+        // re-acquired by a subsequent select_device() call.  ASIO is
+        // single-client: keeping the old Host alive prevents a new one
+        // from opening the same driver (VASIO-8 returns "device no
+        // longer available").
+        self.device = None;
+        self.host = None;
+
         self.state = EngineState::Stopped;
 
         tracing::info!("Audio engine stopped");
