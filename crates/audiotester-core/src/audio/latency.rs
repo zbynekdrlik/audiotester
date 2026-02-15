@@ -94,6 +94,14 @@ pub struct LatencyAnalyzer {
     average_alpha: f64,
     /// Number of measurements taken
     measurement_count: u64,
+    /// ASIO buffer size in frames (0 = unknown, set by engine)
+    buffer_size: u32,
+    /// Cumulative phase offset to compensate for ASIO driver restarts (issue #26).
+    /// When the ASIO driver restarts (e.g. VBMatrix "Restart Audio Engine"),
+    /// the counter relationship between output and input callbacks can shift
+    /// by exactly ±buffer_size frames. This offset is subtracted from raw
+    /// frame_diff to keep reported latency stable.
+    phase_offset: i64,
 }
 
 impl LatencyAnalyzer {
@@ -110,7 +118,17 @@ impl LatencyAnalyzer {
             latency_average: 0.0,
             average_alpha: 0.3, // Faster adaptation
             measurement_count: 0,
+            buffer_size: 0,
+            phase_offset: 0,
         }
+    }
+
+    /// Set the ASIO buffer size in frames.
+    ///
+    /// Required for phase compensation after ASIO driver restarts (issue #26).
+    /// The buffer size is detected from the first audio callback and passed here.
+    pub fn set_buffer_size(&mut self, size: u32) {
+        self.buffer_size = size;
     }
 
     /// Register a burst generation event
@@ -203,13 +221,45 @@ impl LatencyAnalyzer {
         burst_event: &BurstEvent,
         detection: &DetectionEvent,
     ) -> LatencyResult {
-        // Simple frame arithmetic - no timestamps needed!
-        let frame_diff = detection
+        // Raw frame arithmetic
+        let raw_frame_diff = detection
             .input_frame
             .saturating_sub(burst_event.start_frame);
 
-        let latency_samples = frame_diff as usize;
-        let latency_ms = (frame_diff as f64 / self.sample_rate as f64) * 1000.0;
+        // Apply phase compensation (handles ASIO driver restart shifts - issue #26)
+        let mut compensated_diff = (raw_frame_diff as i64 - self.phase_offset).max(0) as u64;
+
+        // Detect ASIO driver restart phase shift:
+        // After warmup, if the compensated measurement suddenly deviates from the
+        // stable average by approximately ±N*buffer_size, a driver restart occurred.
+        // Adjust phase_offset to absorb the shift and keep latency stable.
+        if self.buffer_size > 0 && self.measurement_count > 10 {
+            let expected_frames =
+                (self.latency_average / 1000.0 * self.sample_rate as f64).round() as i64;
+            let deviation = compensated_diff as i64 - expected_frames;
+            let buf = self.buffer_size as i64;
+
+            if deviation.abs() > buf / 2 {
+                let n = (deviation as f64 / buf as f64).round() as i64;
+                let residual = deviation - n * buf;
+                if residual.abs() < 5 && n != 0 {
+                    let shift = n * buf;
+                    self.phase_offset += shift;
+                    compensated_diff = (raw_frame_diff as i64 - self.phase_offset).max(0) as u64;
+                    tracing::info!(
+                        shift_buffers = n,
+                        shift_frames = shift,
+                        total_phase_offset = self.phase_offset,
+                        raw_frame_diff = raw_frame_diff,
+                        compensated_frame_diff = compensated_diff,
+                        "asio_restart_phase_compensated"
+                    );
+                }
+            }
+        }
+
+        let latency_samples = compensated_diff as usize;
+        let latency_ms = (compensated_diff as f64 / self.sample_rate as f64) * 1000.0;
 
         // Update running average
         if self.measurement_count == 0 {
@@ -336,6 +386,7 @@ impl LatencyAnalyzer {
         self.last_result = None;
         self.latency_average = 0.0;
         self.measurement_count = 0;
+        self.phase_offset = 0;
     }
 }
 
@@ -504,6 +555,220 @@ mod tests {
         assert_eq!(analyzer.pending_burst_count(), 0);
         assert_eq!(analyzer.measurement_count(), 0);
         assert!(analyzer.last_result().is_none());
+    }
+
+    #[test]
+    fn test_phase_compensation_after_asio_restart() {
+        // Simulates issue #26: ASIO driver restart shifts frame_diff by buffer_size
+        let mut analyzer = LatencyAnalyzer::new(96000);
+        analyzer.set_buffer_size(128);
+
+        // Warm up with 20 stable measurements at frame_diff=800
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 800,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        let avg_before = analyzer.average_latency_ms();
+
+        // Simulate ASIO restart: frame_diff suddenly shifts by +128 (one buffer)
+        let burst = BurstEvent {
+            start_frame: 20 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 20 * 9600 + 800 + 128,
+        };
+        let result = analyzer.match_detection(&detection);
+
+        assert!(result.is_some(), "Should still produce a measurement");
+        let result = result.unwrap();
+
+        // Phase compensation should normalize back to ~800 samples
+        assert!(
+            (result.latency_samples as i64 - 800).abs() < 5,
+            "Expected ~800 samples after phase compensation, got {}",
+            result.latency_samples
+        );
+
+        // Average should not jump significantly
+        let avg_after = analyzer.average_latency_ms();
+        assert!(
+            (avg_after - avg_before).abs() < 0.1,
+            "Average should stay stable: before={:.3}, after={:.3}",
+            avg_before,
+            avg_after
+        );
+    }
+
+    #[test]
+    fn test_phase_compensation_negative_shift() {
+        // ASIO restart can also shift by -buffer_size
+        let mut analyzer = LatencyAnalyzer::new(96000);
+        analyzer.set_buffer_size(128);
+
+        // Warm up at frame_diff=930
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 930,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        // Shift by -128: frame_diff drops from 930 to 802
+        let burst = BurstEvent {
+            start_frame: 20 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 20 * 9600 + 802,
+        };
+        let result = analyzer.match_detection(&detection).unwrap();
+
+        assert!(
+            (result.latency_samples as i64 - 930).abs() < 5,
+            "Expected ~930 samples after phase compensation, got {}",
+            result.latency_samples
+        );
+    }
+
+    #[test]
+    fn test_phase_compensation_not_triggered_for_genuine_change() {
+        // If latency changes by an amount that's NOT a multiple of buffer_size,
+        // it should NOT be compensated (it's a genuine latency change)
+        let mut analyzer = LatencyAnalyzer::new(96000);
+        analyzer.set_buffer_size(128);
+
+        // Warm up at frame_diff=800
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 800,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        // Genuine latency change: +50 frames (not a multiple of 128)
+        let burst = BurstEvent {
+            start_frame: 20 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 20 * 9600 + 850,
+        };
+        let result = analyzer.match_detection(&detection).unwrap();
+
+        // Should report the actual 850 frames, no compensation
+        assert_eq!(
+            result.latency_samples, 850,
+            "Genuine latency change should not be compensated"
+        );
+    }
+
+    #[test]
+    fn test_phase_compensation_multiple_restarts() {
+        // Multiple ASIO restarts should accumulate compensation correctly
+        let mut analyzer = LatencyAnalyzer::new(96000);
+        analyzer.set_buffer_size(128);
+
+        // Warm up at frame_diff=800
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 800,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        // First restart: +128
+        let burst = BurstEvent {
+            start_frame: 20 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 20 * 9600 + 928,
+        };
+        let r1 = analyzer.match_detection(&detection).unwrap();
+        assert!(
+            (r1.latency_samples as i64 - 800).abs() < 5,
+            "First restart: expected ~800, got {}",
+            r1.latency_samples
+        );
+
+        // Feed a few stable measurements at the new raw offset
+        for i in 21..25 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 928,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        // Second restart: another +128 (raw now at 1056)
+        let burst = BurstEvent {
+            start_frame: 25 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 25 * 9600 + 1056,
+        };
+        let r2 = analyzer.match_detection(&detection).unwrap();
+        assert!(
+            (r2.latency_samples as i64 - 800).abs() < 5,
+            "Second restart: expected ~800, got {}",
+            r2.latency_samples
+        );
+    }
+
+    #[test]
+    fn test_no_phase_compensation_without_buffer_size() {
+        // Without buffer_size set, phase compensation should not activate
+        let mut analyzer = LatencyAnalyzer::new(96000);
+        // Note: NOT calling set_buffer_size()
+
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 800,
+            };
+            analyzer.match_detection(&detection);
+        }
+
+        // Shift by 128 - should NOT be compensated
+        let burst = BurstEvent {
+            start_frame: 20 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 20 * 9600 + 928,
+        };
+        let result = analyzer.match_detection(&detection).unwrap();
+        assert_eq!(
+            result.latency_samples, 928,
+            "Without buffer_size, should report raw value"
+        );
     }
 
     #[test]

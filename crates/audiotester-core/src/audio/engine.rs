@@ -24,7 +24,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 
@@ -171,6 +171,8 @@ pub struct AudioEngine {
     /// Using a single counter eliminates I/O phase offset artifacts that cause
     /// latency measurement to shift by ~1ms after ASIO driver restarts (issue #26).
     shared_frame_counter: Option<Arc<AtomicU64>>,
+    /// ASIO buffer size in frames, detected from first output callback
+    buffer_size_frames: Option<Arc<AtomicU32>>,
     /// Pre-allocated buffer for counter sample reads
     counter_buffer: Vec<f32>,
 }
@@ -194,6 +196,7 @@ impl AudioEngine {
             output_samples: None,
             input_samples: None,
             shared_frame_counter: None,
+            buffer_size_frames: None,
             counter_buffer: Vec::new(),
         }
     }
@@ -451,12 +454,15 @@ impl AudioEngine {
         // This eliminates I/O phase offset artifacts (issue #26) because both burst generation
         // and burst detection reference the same monotonic counter.
         let shared_frame_counter = Arc::new(AtomicU64::new(0));
+        // ASIO buffer size detected from first output callback (for phase compensation)
+        let buffer_size_frames = Arc::new(AtomicU32::new(0));
         let output_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let input_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
         // Create output stream - BurstGenerator moved into closure (lock-free)
         let output_running = Arc::clone(&running);
         let output_counter = Arc::clone(&shared_frame_counter);
+        let output_buf_size = Arc::clone(&buffer_size_frames);
         let output_sample_count = Arc::clone(&output_samples);
         let num_output_channels = output_channels as usize;
         let output_stream = device.build_output_stream(
@@ -497,6 +503,8 @@ impl AudioEngine {
 
                     let prev = output_sample_count.fetch_add(frame_count, Ordering::Relaxed);
                     if prev == 0 {
+                        // Record ASIO buffer size from first callback
+                        output_buf_size.store(frame_count as u32, Ordering::Relaxed);
                         tracing::info!(
                             "Output callback started: {} frames ({} channels), burst mode, ch0={:.4}, ch1={:.4}",
                             frame_count,
@@ -595,6 +603,7 @@ impl AudioEngine {
         self.output_samples = Some(output_samples);
         self.input_samples = Some(input_samples);
         self.shared_frame_counter = Some(shared_frame_counter);
+        self.buffer_size_frames = Some(buffer_size_frames);
         self.counter_buffer = vec![0.0f32; RING_BUFFER_SIZE / 2];
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
@@ -624,6 +633,7 @@ impl AudioEngine {
         self.output_samples = None;
         self.input_samples = None;
         self.shared_frame_counter = None;
+        self.buffer_size_frames = None;
         self.counter_buffer = Vec::new();
 
         // Release ASIO host and device references so the driver can be
@@ -662,6 +672,13 @@ impl AudioEngine {
         // Register any pending burst events from output callback
         let mut burst_count = 0usize;
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
+            // Inform latency analyzer of ASIO buffer size (for phase compensation)
+            if let Some(ref buf_size) = self.buffer_size_frames {
+                let bs = buf_size.load(Ordering::Relaxed);
+                if bs > 0 {
+                    latency_analyzer.set_buffer_size(bs);
+                }
+            }
             while let Ok(event) = burst_event_rx.try_recv() {
                 latency_analyzer.register_burst(event);
                 burst_count += 1;
