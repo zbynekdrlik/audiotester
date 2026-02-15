@@ -324,6 +324,14 @@ impl AudioEngine {
     /// Opens input and output streams on the selected device and begins
     /// generating burst signals and analyzing received audio for latency.
     pub fn start(&mut self) -> Result<()> {
+        // Re-acquire ASIO device handle to avoid stale references after
+        // driver reinitialization (e.g. after reboot or VBMatrix restart)
+        if let Some(ref name) = self.device_name.clone() {
+            if let Err(e) = self.select_device(name) {
+                tracing::warn!(error = %e, "Failed to re-select device, using existing handle");
+            }
+        }
+
         let device = self
             .device
             .as_ref()
