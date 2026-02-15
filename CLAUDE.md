@@ -89,16 +89,45 @@ The agent MUST NOT:
 - **Test machines are for TESTING ONLY** - never install dev tools or set up dev environments on them
 - Use idiomatic Rust patterns and maintain backward compatibility
 - Keep solutions simple and focused - avoid over-engineering
-- **ALWAYS provide a mergeable PR URL** - After completing work, the agent MUST:
-  1. Push changes to `dev` branch
-  2. Wait for CI to pass (check GitHub Actions)
-  3. Create PR from `dev` to `main`
-  4. Provide the PR URL to the user
-  5. PR must be GREEN (CI passing) and ready to merge
+- **ALWAYS provide a mergeable PR URL** - see "PR Delivery" section below
 - **VERSION, RELEASE, AND DEPLOY ARE FULLY AUTOMATIC** - After PR merge to `main`:
   - `auto-release.yml` handles everything: version bump → build → release → deploy
   - Agent does NOT need to manually create tags or trigger workflows
   - Agent should monitor the auto-release workflow and report result to user
+
+## PR Delivery (STRICTLY ENFORCED)
+
+**CRITICAL: Every completed task MUST end with the agent providing a PR URL to the user.**
+
+The PR URL is the ONLY deliverable the user cares about. No task is complete without it.
+
+### Required Workflow
+
+```
+1. Push to dev
+2. Wait for ALL CI jobs to pass (do NOT create PR before CI is green)
+3. Create PR: gh pr create --base main --head dev
+4. Provide the PR URL to the user as the FINAL message
+```
+
+### Rules
+
+- **NEVER say "done" without a PR URL** - If there is no PR URL, the work is not done
+- **NEVER ask the user to create the PR** - The agent creates the PR, always
+- **NEVER skip waiting for CI** - PR must be GREEN before presenting to user
+- **If a PR already exists** from dev to main, provide its URL (do not create a duplicate)
+- **The PR URL must be clearly visible** in the final message, not buried in text
+- **Format**: End the final summary with `**PR: https://github.com/.../pull/N**`
+
+### What "Done" Looks Like
+
+```
+[Summary of changes]
+
+**PR: https://github.com/zbynekdrlik/audiotester/pull/N**
+```
+
+The agent MUST NOT consider a task complete until the PR URL has been delivered.
 
 ## Code Standards
 
