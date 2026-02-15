@@ -382,7 +382,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         tracing::debug!(error = %e, "Stop during ASIO restart recovery");
                     }
 
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    // Wait for VBMatrix to fully settle after its audio engine restart.
+                    // VBMatrix takes 1-2s to restart; starting ASIO streams too early
+                    // causes non-deterministic buffer phase alignment (±128 samples).
+                    // 3s is conservative: ensures VBMatrix is fully stable before
+                    // we create fresh ASIO streams with correct I/O phase.
+                    tracing::info!("Waiting 3s for ASIO driver to settle before restart");
+                    tokio::time::sleep(Duration::from_millis(3000)).await;
 
                     if let Some(ref device) = last_device_name {
                         if let Err(e) = engine.select_device(device.clone()).await {
