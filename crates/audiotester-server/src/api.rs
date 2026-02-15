@@ -313,14 +313,14 @@ pub async fn toggle_monitoring(
     if req.enabled {
         if current.state != EngineState::Running {
             // Allow ASIO driver time to release resources after stop().
-            // Without this delay, re-selecting the device can fail because
-            // the driver still holds references from the previous session.
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // VBMatrix VASIO-8 can hold exclusive device access for several
+            // seconds after streams are dropped.
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
-            // Retry loop: ASIO drivers (especially VBMatrix VASIO-8) may need
-            // multiple attempts to reconnect after stop/start cycles.
-            // Re-select device on each attempt for a fresh ASIO handle.
-            let max_attempts = 3;
+            // Retry loop with exponential backoff: ASIO drivers (especially
+            // VBMatrix VASIO-8) may need up to ~10 seconds to fully release
+            // resources after stop/start cycles.
+            let max_attempts = 5u32;
             let mut last_error = String::new();
             let mut started = false;
 
@@ -333,7 +333,10 @@ pub async fn toggle_monitoring(
                             format!("Failed to re-select device (attempt {}): {}", attempt, e);
                         tracing::warn!("{}", last_error);
                         if attempt < max_attempts {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            // Exponential backoff: 1s, 2s, 4s, 8s
+                            let delay = 1000u64 * 2u64.pow(attempt - 1);
+                            let delay = delay.min(8000); // cap at 8s
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
                         continue;
                     }
@@ -351,7 +354,10 @@ pub async fn toggle_monitoring(
                         last_error = format!("Failed to start (attempt {}): {}", attempt, e);
                         tracing::warn!("{}", last_error);
                         if attempt < max_attempts {
-                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                            // Exponential backoff: 1s, 2s, 4s, 8s
+                            let delay = 1000u64 * 2u64.pow(attempt - 1);
+                            let delay = delay.min(8000); // cap at 8s
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
                         }
                     }
                 }
