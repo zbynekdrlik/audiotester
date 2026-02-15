@@ -57,15 +57,15 @@ test.describe("Issue #24: Device Info Bar Layout Stability", () => {
     }
   });
 
-  test("device info bar has flex-wrap for multi-line support", async ({
+  test("device info bar stays on single line with overflow hidden", async ({
     page,
   }) => {
     const bar = page.locator(".device-info-bar");
     await expect(bar).toBeVisible();
-    const flexWrap = await bar.evaluate((el) => {
-      return getComputedStyle(el).flexWrap;
+    const overflow = await bar.evaluate((el) => {
+      return getComputedStyle(el).overflow;
     });
-    expect(flexWrap).toBe("wrap");
+    expect(overflow).toBe("hidden");
   });
 
   test("reset button does not wrap its text", async ({ page }) => {
