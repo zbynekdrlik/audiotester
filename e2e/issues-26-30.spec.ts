@@ -201,6 +201,44 @@ test.describe("Issue #26: Latency Measurement Stability", () => {
   });
 });
 
+// Diagnostic logging API
+test.describe("Diagnostic Logging API", () => {
+  test("GET /api/v1/logs returns recent log lines", async ({ request }) => {
+    const resp = await request.get("/api/v1/logs?tail=50");
+    expect(resp.ok()).toBeTruthy();
+    const text = await resp.text();
+    expect(text.length).toBeGreaterThan(0);
+    // Should contain app startup logs
+    expect(text).toContain("audiotester");
+  });
+
+  test("GET /api/v1/logs supports tail parameter", async ({ request }) => {
+    const resp5 = await request.get("/api/v1/logs?tail=5");
+    expect(resp5.ok()).toBeTruthy();
+    const text5 = await resp5.text();
+
+    const resp50 = await request.get("/api/v1/logs?tail=50");
+    expect(resp50.ok()).toBeTruthy();
+    const text50 = await resp50.text();
+
+    // More lines requested should return equal or more content
+    expect(text50.length).toBeGreaterThanOrEqual(text5.length);
+  });
+
+  test("GET /api/v1/logs supports filter parameter", async ({ request }) => {
+    const resp = await request.get("/api/v1/logs?tail=200&filter=INFO");
+    expect(resp.ok()).toBeTruthy();
+    const text = await resp.text();
+    // Every returned line should contain the filter keyword
+    if (text.length > 0) {
+      const lines = text.split("\n").filter((l) => l.length > 0);
+      for (const line of lines) {
+        expect(line).toContain("INFO");
+      }
+    }
+  });
+});
+
 // Hardware-only tests for issue #30 and #26
 test.describe("Issue #30/#26 Hardware Tests", () => {
   test.skip(!isHardwareTest, "Requires AUDIOTESTER_HARDWARE_TEST=true");
