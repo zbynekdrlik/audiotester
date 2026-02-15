@@ -34,6 +34,9 @@ pub use stats::store::{DisconnectionEvent, LossEvent, StatsStore};
 /// Application version from Cargo.toml
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// Build date (YYYY-MM-DD) set at compile time
+pub const BUILD_DATE: &str = env!("BUILD_DATE");
+
 /// Default sample rate for audio processing (96kHz for professional setups)
 pub const DEFAULT_SAMPLE_RATE: u32 = 96000;
 

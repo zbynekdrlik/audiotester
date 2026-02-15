@@ -35,6 +35,7 @@ fn DashboardPage() -> impl IntoView {
             <body>
                 <header class="header">
                     <h1>"Audiotester"</h1>
+                    <span class="version-info" id="version-info" data-testid="version-info"></span>
                     <nav>
                         <a href="/" class="nav-link active">"Dashboard"</a>
                         <a href="/settings" class="nav-link">"Settings"</a>

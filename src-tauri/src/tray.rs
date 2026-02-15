@@ -37,6 +37,12 @@ const ICON_SIZE: u32 = 16;
 
 /// Set up the tray icon with menu
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let version_label = format!(
+        "v{} ({})",
+        audiotester_core::VERSION,
+        audiotester_core::BUILD_DATE
+    );
+    let version_item = MenuItem::with_id(app, "version", &version_label, false, None::<&str>)?;
     let status_item = MenuItem::with_id(app, "status", "Status: Starting...", false, None::<&str>)?;
     let separator1 = PredefinedMenuItem::separator(app)?;
     let dashboard_item = MenuItem::with_id(app, "dashboard", "Open Dashboard", true, None::<&str>)?;
@@ -54,6 +60,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let menu = Menu::with_items(
         app,
         &[
+            &version_item,
             &status_item,
             &separator1,
             &dashboard_item,
@@ -143,6 +150,9 @@ fn show_remote_url(_app: &AppHandle) {
 }
 
 /// Create an RGBA icon for the given status
+///
+/// Draws a 3-bar audio equalizer/level meter instead of a generic circle,
+/// making the tray icon visually distinct from other applications.
 pub fn make_status_icon(status: TrayStatus) -> Image<'static> {
     let (r, g, b) = match status {
         TrayStatus::Ok => (0x00u8, 0xC8u8, 0x00u8),
@@ -151,23 +161,38 @@ pub fn make_status_icon(status: TrayStatus) -> Image<'static> {
         TrayStatus::Disconnected => (0x80, 0x80, 0x80),
     };
 
-    let mut rgba = Vec::with_capacity((ICON_SIZE * ICON_SIZE * 4) as usize);
-    let center = ICON_SIZE as f32 / 2.0;
-    let radius = center - 1.0;
+    let mut rgba = vec![0u8; (ICON_SIZE * ICON_SIZE * 4) as usize];
 
-    for y in 0..ICON_SIZE {
-        for x in 0..ICON_SIZE {
-            let dx = x as f32 - center + 0.5;
-            let dy = y as f32 - center + 0.5;
-            let dist = (dx * dx + dy * dy).sqrt();
+    // 3 vertical bars (equalizer style)
+    // Bar positions: x=2..5, x=7..10, x=12..15 (3px wide each)
+    // Bar heights: 10, 14, 12 pixels (varied for visual interest)
+    // Bottom-aligned at y=15
+    let bars: [(u32, u32, u32); 3] = [
+        (2, 3, 10), // (x_start, width, height)
+        (7, 3, 14),
+        (12, 3, 12),
+    ];
+    let bottom = 15u32; // bottom pixel row
 
-            if dist <= radius {
-                rgba.extend_from_slice(&[r, g, b, 255]);
-            } else if dist <= radius + 1.0 {
-                let alpha = ((radius + 1.0 - dist) * 255.0) as u8;
-                rgba.extend_from_slice(&[r, g, b, alpha]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
+    for &(x_start, width, height) in &bars {
+        let y_top = bottom.saturating_sub(height) + 1;
+        for y in y_top..=bottom {
+            for x in x_start..x_start + width {
+                if x < ICON_SIZE && y < ICON_SIZE {
+                    let idx = ((y * ICON_SIZE + x) * 4) as usize;
+                    // Anti-alias the top row for rounded appearance
+                    if y == y_top {
+                        rgba[idx] = r;
+                        rgba[idx + 1] = g;
+                        rgba[idx + 2] = b;
+                        rgba[idx + 3] = 180; // semi-transparent top edge
+                    } else {
+                        rgba[idx] = r;
+                        rgba[idx + 1] = g;
+                        rgba[idx + 2] = b;
+                        rgba[idx + 3] = 255;
+                    }
+                }
             }
         }
     }

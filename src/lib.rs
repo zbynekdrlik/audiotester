@@ -29,5 +29,5 @@ pub use audiotester_core::MlsGenerator;
 pub use audiotester_core::{DisconnectionEvent, LossEvent, StatsStore};
 
 // Constants
+pub use audiotester_core::{BUILD_DATE, DEFAULT_SAMPLE_RATE, MLS_LENGTH, MLS_ORDER, VERSION};
 pub use audiotester_core::{BURST_CYCLE_MS, BURST_DURATION_MS};
-pub use audiotester_core::{DEFAULT_SAMPLE_RATE, MLS_LENGTH, MLS_ORDER, VERSION};
