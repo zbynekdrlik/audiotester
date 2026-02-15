@@ -205,7 +205,7 @@ jobs:
         run: |
           sshpass -e ssh -o StrictHostKeyChecking=no \
             "${{ secrets.IEM_USER }}@${{ secrets.IEM_HOST }}" \
-            "powershell -Command \"\$ws = New-Object -ComObject WScript.Shell; \$s = \$ws.CreateShortcut([Environment]::GetFolderPath('StartMenu') + '\\Programs\\Audiotester.lnk'); \$s.TargetPath = 'C:\\Users\\iem\\audiotester\\start.bat'; \$s.WorkingDirectory = 'C:\\Users\\iem\\audiotester'; \$s.Description = 'ASIO Audio Testing Application'; \$s.IconLocation = 'C:\\Users\\iem\\audiotester\\audiotester.exe,0'; \$s.WindowStyle = 7; \$s.Save()\""
+            "powershell -Command \"\$ws = New-Object -ComObject WScript.Shell; \$s = \$ws.CreateShortcut([Environment]::GetFolderPath('CommonStartMenu') + '\\Programs\\Audiotester.lnk'); \$s.TargetPath = 'C:\\Users\\iem\\audiotester\\start.bat'; \$s.WorkingDirectory = 'C:\\Users\\iem\\audiotester'; \$s.Description = 'ASIO Audio Testing Application'; \$s.IconLocation = 'C:\\Users\\iem\\audiotester\\audiotester.exe,0'; \$s.WindowStyle = 7; \$s.Save()\""
 
       - name: Start application
         env:
