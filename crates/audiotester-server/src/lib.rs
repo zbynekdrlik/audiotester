@@ -46,6 +46,9 @@ pub enum EngineCommand {
     GetSampleCounts {
         reply: oneshot::Sender<(usize, usize)>,
     },
+    IsStreamInvalidated {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Engine status snapshot (safe to send between threads)
@@ -99,6 +102,9 @@ impl EngineHandle {
                     }
                     EngineCommand::GetSampleCounts { reply } => {
                         let _ = reply.send(engine.sample_counts());
+                    }
+                    EngineCommand::IsStreamInvalidated { reply } => {
+                        let _ = reply.send(engine.is_stream_invalidated());
                     }
                 }
             }
@@ -176,6 +182,18 @@ impl EngineHandle {
         let (reply, rx) = oneshot::channel();
         self.tx
             .send(EngineCommand::GetSampleCounts { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
+    /// Check if the ASIO driver sent a stream invalidation (kAsioResetRequest).
+    ///
+    /// Returns true when the driver has reset and streams need to be rebuilt.
+    pub async fn is_stream_invalidated(&self) -> anyhow::Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::IsStreamInvalidated { reply })
             .await
             .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
         rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))

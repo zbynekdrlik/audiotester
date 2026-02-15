@@ -318,6 +318,44 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             }
         }
 
+        // Check for ASIO stream invalidation (issue #26):
+        // cpal 0.17 fires StreamError::StreamInvalidated when the ASIO driver
+        // sends kAsioResetRequest (e.g. VBMatrix "Restart Audio Engine").
+        // When detected, do a full engine restart for clean measurement state.
+        if let Ok(true) = engine.is_stream_invalidated().await {
+            tracing::warn!("ASIO stream invalidated (driver reset detected), restarting engine");
+
+            // Full engine restart: stop → re-select device → start
+            if let Err(e) = engine.stop().await {
+                tracing::debug!(error = %e, "Stop during stream invalidation recovery");
+            }
+
+            // Brief pause for ASIO driver to settle
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            if let Some(ref device) = last_device_name {
+                if let Err(e) = engine.select_device(device.clone()).await {
+                    tracing::warn!(error = %e, "Failed to re-select device after stream invalidation");
+                }
+            }
+
+            match engine.start().await {
+                Ok(()) => {
+                    tracing::info!("Engine restarted after ASIO stream invalidation");
+                    last_successful_analysis = None;
+                    signal_lost = false;
+                    signal_lost_since = None;
+                    if let Ok(mut store) = stats.lock() {
+                        store.set_signal_lost(false);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to restart engine after stream invalidation");
+                }
+            }
+            continue;
+        }
+
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {

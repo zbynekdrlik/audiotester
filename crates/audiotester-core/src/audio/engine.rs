@@ -21,7 +21,7 @@ use crate::audio::detector::BurstDetector;
 use crate::audio::latency::{LatencyAnalyzer, LatencyResult};
 use anyhow::{anyhow, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, Host, SampleRate, Stream, StreamConfig};
+use cpal::{Device, Host, Stream, StreamConfig};
 use ringbuf::traits::{Consumer, Observer, Producer, Split};
 use ringbuf::HeapRb;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -173,6 +173,9 @@ pub struct AudioEngine {
     shared_frame_counter: Option<Arc<AtomicU64>>,
     /// ASIO buffer size in frames, detected from first output callback
     buffer_size_frames: Option<Arc<AtomicU32>>,
+    /// Set by error callbacks when ASIO sends kAsioResetRequest (cpal 0.17+).
+    /// The monitoring loop checks this flag and triggers a full engine restart.
+    stream_invalidated: Option<Arc<AtomicBool>>,
     /// Pre-allocated buffer for counter sample reads
     counter_buffer: Vec<f32>,
 }
@@ -197,6 +200,7 @@ impl AudioEngine {
             input_samples: None,
             shared_frame_counter: None,
             buffer_size_frames: None,
+            stream_invalidated: None,
             counter_buffer: Vec::new(),
         }
     }
@@ -241,11 +245,18 @@ impl AudioEngine {
         let host = Self::get_asio_host()?;
         let mut devices = Vec::new();
 
-        let default_input = host.default_input_device().map(|d| d.name().ok());
-        let default_output = host.default_output_device().map(|d| d.name().ok());
+        let default_input = host
+            .default_input_device()
+            .map(|d| d.description().ok().map(|desc| desc.name().to_string()));
+        let default_output = host
+            .default_output_device()
+            .map(|d| d.description().ok().map(|desc| desc.name().to_string()));
 
         for device in host.devices()? {
-            let name = device.name().unwrap_or_else(|_| "Unknown".to_string());
+            let name = device
+                .description()
+                .map(|d| d.name().to_string())
+                .unwrap_or_else(|_| "Unknown".to_string());
 
             let is_default = default_input
                 .as_ref()
@@ -274,7 +285,7 @@ impl AudioEngine {
             if let Ok(configs) = device.supported_output_configs() {
                 for config in configs {
                     for &rate in &common_rates {
-                        if (config.min_sample_rate().0..=config.max_sample_rate().0).contains(&rate)
+                        if (config.min_sample_rate()..=config.max_sample_rate()).contains(&rate)
                             && !sample_rates.contains(&rate)
                         {
                             sample_rates.push(rate);
@@ -306,7 +317,11 @@ impl AudioEngine {
 
         let device = host
             .devices()?
-            .find(|d| d.name().map(|n| n == name).unwrap_or(false))
+            .find(|d| {
+                d.description()
+                    .map(|desc| desc.name() == name)
+                    .unwrap_or(false)
+            })
             .ok_or_else(|| AudioEngineError::DeviceNotFound(name.to_string()))?;
 
         self.host = Some(host);
@@ -339,19 +354,19 @@ impl AudioEngine {
             "Device default output config: {:?}",
             default_output
                 .as_ref()
-                .map(|c| (c.sample_rate().0, c.channels()))
+                .map(|c| (c.sample_rate(), c.channels()))
         );
         tracing::info!(
             "Device default input config: {:?}",
             default_input
                 .as_ref()
-                .map(|c| (c.sample_rate().0, c.channels()))
+                .map(|c| (c.sample_rate(), c.channels()))
         );
 
         // Use configured sample rate, with fallback to device default
         let device_rate = default_output
             .as_ref()
-            .map(|c| c.sample_rate().0)
+            .map(|c| c.sample_rate())
             .unwrap_or(self.sample_rate);
         let actual_sample_rate = self.sample_rate;
         tracing::info!("Using configured sample rate: {} Hz", actual_sample_rate);
@@ -382,19 +397,19 @@ impl AudioEngine {
         let mut effective_rate = actual_sample_rate;
         let mut output_config = StreamConfig {
             channels: output_channels,
-            sample_rate: SampleRate(actual_sample_rate),
+            sample_rate: actual_sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
         let mut input_config = StreamConfig {
             channels: input_channels,
-            sample_rate: SampleRate(actual_sample_rate),
+            sample_rate: actual_sample_rate,
             buffer_size: cpal::BufferSize::Default,
         };
 
         // Test which sample rate works by trying a dummy build
         for &rate in &rates_to_try {
-            output_config.sample_rate = SampleRate(rate);
-            input_config.sample_rate = SampleRate(rate);
+            output_config.sample_rate = rate;
+            input_config.sample_rate = rate;
             match device.build_output_stream(
                 &output_config,
                 |_: &mut [f32], _: &cpal::OutputCallbackInfo| {},
@@ -420,8 +435,8 @@ impl AudioEngine {
         }
 
         // Update configs with the effective rate
-        output_config.sample_rate = SampleRate(effective_rate);
-        input_config.sample_rate = SampleRate(effective_rate);
+        output_config.sample_rate = effective_rate;
+        input_config.sample_rate = effective_rate;
         tracing::info!("Effective sample rate: {} Hz", effective_rate);
 
         // Counter ring buffer: ch1 samples for loss detection only
@@ -454,8 +469,10 @@ impl AudioEngine {
         // This eliminates I/O phase offset artifacts (issue #26) because both burst generation
         // and burst detection reference the same monotonic counter.
         let shared_frame_counter = Arc::new(AtomicU64::new(0));
-        // ASIO buffer size detected from first output callback (for phase compensation)
+        // ASIO buffer size detected from first output callback
         let buffer_size_frames = Arc::new(AtomicU32::new(0));
+        // Flag set by error callback when ASIO driver sends kAsioResetRequest
+        let stream_invalidated = Arc::new(AtomicBool::new(false));
         let output_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let input_samples = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
@@ -517,8 +534,16 @@ impl AudioEngine {
                     data.fill(0.0);
                 }
             },
-            move |err| {
-                tracing::error!("Output stream error: {}", err);
+            {
+                let invalidated = Arc::clone(&stream_invalidated);
+                move |err| {
+                    if matches!(err, cpal::StreamError::StreamInvalidated) {
+                        tracing::warn!("Output stream invalidated (ASIO driver reset)");
+                        invalidated.store(true, Ordering::Release);
+                    } else {
+                        tracing::error!("Output stream error: {}", err);
+                    }
+                }
             },
             None,
         )?;
@@ -582,8 +607,16 @@ impl AudioEngine {
                     }
                 }
             },
-            move |err| {
-                tracing::error!("Input stream error: {}", err);
+            {
+                let invalidated = Arc::clone(&stream_invalidated);
+                move |err| {
+                    if matches!(err, cpal::StreamError::StreamInvalidated) {
+                        tracing::warn!("Input stream invalidated (ASIO driver reset)");
+                        invalidated.store(true, Ordering::Release);
+                    } else {
+                        tracing::error!("Input stream error: {}", err);
+                    }
+                }
             },
             None,
         )?;
@@ -604,6 +637,7 @@ impl AudioEngine {
         self.input_samples = Some(input_samples);
         self.shared_frame_counter = Some(shared_frame_counter);
         self.buffer_size_frames = Some(buffer_size_frames);
+        self.stream_invalidated = Some(stream_invalidated);
         self.counter_buffer = vec![0.0f32; RING_BUFFER_SIZE / 2];
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
@@ -634,6 +668,7 @@ impl AudioEngine {
         self.input_samples = None;
         self.shared_frame_counter = None;
         self.buffer_size_frames = None;
+        self.stream_invalidated = None;
         self.counter_buffer = Vec::new();
 
         // Release ASIO host and device references so the driver can be
@@ -672,13 +707,6 @@ impl AudioEngine {
         // Register any pending burst events from output callback
         let mut burst_count = 0usize;
         if let Ok(mut latency_analyzer) = shared_state.latency_analyzer.lock() {
-            // Inform latency analyzer of ASIO buffer size (for phase compensation)
-            if let Some(ref buf_size) = self.buffer_size_frames {
-                let bs = buf_size.load(Ordering::Relaxed);
-                if bs > 0 {
-                    latency_analyzer.set_buffer_size(bs);
-                }
-            }
             while let Ok(event) = burst_event_rx.try_recv() {
                 latency_analyzer.register_burst(event);
                 burst_count += 1;
@@ -774,6 +802,19 @@ impl AudioEngine {
             .map(|s| s.load(Ordering::Relaxed))
             .unwrap_or(0);
         (out, inp)
+    }
+
+    /// Check if the ASIO driver sent a reset request (stream invalidated).
+    ///
+    /// Returns true if kAsioResetRequest was received, meaning the streams
+    /// are stale and the engine must be fully restarted (stop + start).
+    /// This handles VBMatrix "Restart Audio Engine" and similar ASIO
+    /// driver reconfigurations (issue #26).
+    pub fn is_stream_invalidated(&self) -> bool {
+        self.stream_invalidated
+            .as_ref()
+            .map(|f| f.load(Ordering::Acquire))
+            .unwrap_or(false)
     }
 
     /// Get latency measurement update rate in Hz
