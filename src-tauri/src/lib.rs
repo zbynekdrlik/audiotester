@@ -228,6 +228,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut device_info_update_counter: u32 = 0;
     let mut last_successful_analysis: Option<std::time::Instant> = None;
     let mut signal_lost = false;
+    let mut signal_lost_since: Option<std::time::Instant> = None;
     let mut reconnect_start: Option<std::time::Instant> = None;
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
@@ -300,6 +301,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     // Reset signal_lost if it was set
                     if signal_lost {
                         signal_lost = false;
+                        signal_lost_since = None;
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
@@ -312,6 +314,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 } else if !signal_lost {
                     // Invalid signal - set signal_lost immediately
                     signal_lost = true;
+                    signal_lost_since = Some(std::time::Instant::now());
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(true);
                     }
@@ -380,6 +383,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         if let Some(last) = last_successful_analysis {
                             if last.elapsed() > Duration::from_secs(1) && !signal_lost {
                                 signal_lost = true;
+                                signal_lost_since = Some(std::time::Instant::now());
                                 if let Ok(mut store) = stats.lock() {
                                     store.set_signal_lost(true);
                                 }
@@ -468,6 +472,47 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         store.record_disconnection(duration, false);
                     }
                     reconnect_start = None;
+                }
+            }
+        }
+
+        // Signal-loss reconnection: when signal has been lost for >10s,
+        // attempt to reconnect by stopping and restarting the engine.
+        // This handles ASIO driver restarts (e.g. VBMatrix buffer changes)
+        // where streams stay alive but receive silence.
+        if signal_lost && !reconnect_in_progress {
+            if let Some(lost_since) = signal_lost_since {
+                if lost_since.elapsed() > Duration::from_secs(10) {
+                    tracing::warn!("Signal lost for >10s, attempting ASIO reconnection");
+
+                    if last_status != tray::TrayStatus::Disconnected {
+                        last_status = tray::TrayStatus::Disconnected;
+                        emit_tray_status(tray::TrayStatus::Disconnected, 0.0, 0);
+                    }
+
+                    // Full reconnection: stop, re-select device, start
+                    if let Err(e) = engine.stop().await {
+                        tracing::debug!(error = %e, "Stop during signal-loss reconnect");
+                    }
+
+                    if let Some(ref device) = last_device_name {
+                        if let Err(e) = engine.select_device(device.clone()).await {
+                            tracing::warn!(error = %e, "Failed to re-select device");
+                        }
+                    }
+
+                    match engine.start().await {
+                        Ok(()) => {
+                            tracing::info!("Engine restarted after signal loss");
+                            last_successful_analysis = None;
+                            signal_lost_since = Some(std::time::Instant::now());
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to restart after signal loss");
+                            // Push the timer forward to retry in another 10s
+                            signal_lost_since = Some(std::time::Instant::now());
+                        }
+                    }
                 }
             }
         }
