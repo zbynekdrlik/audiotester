@@ -142,6 +142,20 @@
     }
   });
 
+  function showError(message) {
+    var existing = document.querySelector(".error-notification");
+    if (existing) existing.remove();
+
+    var el = document.createElement("div");
+    el.className = "error-notification";
+    el.textContent = message;
+    document.body.appendChild(el);
+
+    setTimeout(function () {
+      if (el.parentNode) el.remove();
+    }, 5000);
+  }
+
   startBtn.addEventListener("click", async function () {
     try {
       const resp = await fetch("/api/v1/monitoring", {
@@ -149,9 +163,15 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: true }),
       });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        showError("Start failed: " + errText);
+        return;
+      }
       const status = await resp.json();
       updateMonitoringUI(status.monitoring);
     } catch (e) {
+      showError("Start failed: " + e.message);
       console.error("Failed to start:", e);
     }
   });
@@ -163,9 +183,15 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: false }),
       });
+      if (!resp.ok) {
+        const errText = await resp.text();
+        showError("Stop failed: " + errText);
+        return;
+      }
       const status = await resp.json();
       updateMonitoringUI(status.monitoring);
     } catch (e) {
+      showError("Stop failed: " + e.message);
       console.error("Failed to stop:", e);
     }
   });

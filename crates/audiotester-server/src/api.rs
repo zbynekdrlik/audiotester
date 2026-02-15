@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize)]
 pub struct StatusResponse {
     pub version: String,
+    pub build_date: String,
     pub state: String,
     pub device: Option<String>,
     pub sample_rate: u32,
@@ -109,6 +110,7 @@ pub async fn get_status(
 
     Ok(Json(StatusResponse {
         version: audiotester_core::VERSION.to_string(),
+        build_date: audiotester_core::BUILD_DATE.to_string(),
         state: format!("{:?}", status.state),
         device: status.device_name,
         sample_rate: status.sample_rate,
@@ -313,7 +315,16 @@ pub async fn toggle_monitoring(
             // Re-select device to get a fresh ASIO handle before starting.
             // After reboot or driver restart, the stored handle may be stale.
             if let Some(ref device) = current.device_name {
-                let _ = state.engine.select_device(device.clone()).await;
+                state
+                    .engine
+                    .select_device(device.clone())
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("Failed to re-select device: {}", e),
+                        )
+                    })?;
             }
             state.engine.start().await.map_err(|e| {
                 (
@@ -339,6 +350,7 @@ pub async fn toggle_monitoring(
 
     Ok(Json(StatusResponse {
         version: audiotester_core::VERSION.to_string(),
+        build_date: audiotester_core::BUILD_DATE.to_string(),
         state: format!("{:?}", status.state),
         device: status.device_name,
         sample_rate: status.sample_rate,
@@ -354,6 +366,7 @@ mod tests {
     fn test_status_response_serializes() {
         let resp = StatusResponse {
             version: "0.1.5".to_string(),
+            build_date: "2026-02-15".to_string(),
             state: "Stopped".to_string(),
             device: None,
             sample_rate: 96000,
@@ -361,6 +374,7 @@ mod tests {
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"version\":\"0.1.5\""));
+        assert!(json.contains("\"build_date\":\"2026-02-15\""));
     }
 
     #[test]

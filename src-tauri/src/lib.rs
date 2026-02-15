@@ -34,6 +34,21 @@ pub fn run() {
 
     tracing::info!("Starting Audiotester v{}", audiotester_core::VERSION);
 
+    // Set process priority to HIGH for audio stability (prevents ASIO callback starvation
+    // when other windows overlap the dashboard - issue #23)
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::System::Threading::{
+            GetCurrentProcess, SetPriorityClass, HIGH_PRIORITY_CLASS,
+        };
+        let result = unsafe { SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) };
+        if result != 0 {
+            tracing::info!("Process priority set to HIGH for audio stability");
+        } else {
+            tracing::warn!("Failed to set process priority to HIGH");
+        }
+    }
+
     // Initialize the Notify before spawning any tasks
     let _ = APP_HANDLE_NOTIFY.set(Arc::new(tokio::sync::Notify::new()));
 

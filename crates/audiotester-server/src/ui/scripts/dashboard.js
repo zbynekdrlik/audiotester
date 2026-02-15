@@ -275,6 +275,26 @@
       });
   }
 
+  // Fetch and display version info
+  function loadVersionInfo() {
+    var versionEl = document.getElementById("version-info");
+    if (!versionEl) return;
+    fetch("/api/v1/status")
+      .then(function (resp) {
+        return resp.json();
+      })
+      .then(function (data) {
+        if (data.version && data.build_date) {
+          versionEl.textContent =
+            "v" + data.version + " (" + data.build_date + ")";
+        }
+      })
+      .catch(function (err) {
+        console.error("Failed to load version info:", err);
+      });
+  }
+
+  loadVersionInfo();
   loadRemoteUrl();
   connect();
 })();
