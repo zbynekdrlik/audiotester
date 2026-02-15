@@ -95,39 +95,53 @@ The agent MUST NOT:
   - Agent does NOT need to manually create tags or trigger workflows
   - Agent should monitor the auto-release workflow and report result to user
 
-## PR Delivery (STRICTLY ENFORCED)
+## PR Delivery (STRICTLY ENFORCED - NO EXCEPTIONS)
 
-**CRITICAL: Every completed task MUST end with the agent providing a PR URL to the user.**
+**CRITICAL: Every completed task MUST end with a GREEN, MERGEABLE PR URL delivered to the user.**
 
-The PR URL is the ONLY deliverable the user cares about. No task is complete without it.
+The user's ONLY deliverable is a PR they can click "Merge" on immediately. If the PR is not green, it is NOT delivered. If there is no PR URL, the work is NOT done.
 
-### Required Workflow
+### Required Workflow (MANDATORY - EVERY SINGLE TIME)
 
 ```
 1. Push to dev
-2. Wait for ALL CI jobs to pass (do NOT create PR before CI is green)
-3. Create PR: gh pr create --base main --head dev
-4. Provide the PR URL to the user as the FINAL message
+2. Wait for ALL CI jobs to pass (poll with gh run view until conclusion=success)
+3. Verify CI is GREEN - if ANY job failed, fix and push again, repeat from step 1
+4. Create PR: gh pr create --base main --head dev (or reuse existing open PR)
+5. Verify PR is mergeable: gh pr view --json mergeable,reviewDecision,statusCheckRollup
+6. Provide the PR URL as the LAST thing the user sees
 ```
 
 ### Rules
 
-- **NEVER say "done" without a PR URL** - If there is no PR URL, the work is not done
+- **NEVER say "done" without a PR URL** - No PR URL = work not finished
+- **NEVER present a RED/FAILING PR** - If CI is not green, FIX IT first. Do not tell the user "CI is running" and move on
 - **NEVER ask the user to create the PR** - The agent creates the PR, always
-- **NEVER skip waiting for CI** - PR must be GREEN before presenting to user
-- **If a PR already exists** from dev to main, provide its URL (do not create a duplicate)
-- **The PR URL must be clearly visible** in the final message, not buried in text
-- **Format**: End the final summary with `**PR: https://github.com/.../pull/N**`
+- **NEVER skip waiting for CI** - The agent MUST poll CI status until ALL jobs complete
+- **NEVER present a PR with merge conflicts** - Rebase dev on main if needed before creating PR
+- **If a PR already exists** from dev to main, verify it is green and provide its URL
+- **The PR URL must be the last line** of the final message, clearly visible, not buried
+- **If CI fails after push** - the agent MUST fix the issue, push again, wait for green, THEN deliver
 
 ### What "Done" Looks Like
 
 ```
-[Summary of changes]
+[Brief summary of changes]
+[Verification results from iem.lan]
 
 **PR: https://github.com/zbynekdrlik/audiotester/pull/N**
 ```
 
-The agent MUST NOT consider a task complete until the PR URL has been delivered.
+### What "Done" Does NOT Look Like (NEVER DO THIS)
+
+```
+"I've pushed the changes, CI is running..."          # NOT DONE - no PR
+"Here's the PR: [url] - CI is still running"         # NOT DONE - not green
+"Done! You can create a PR from dev to main"          # NOT DONE - agent must create PR
+"The PR has some failing checks but..."               # NOT DONE - must be green
+```
+
+**The task is INCOMPLETE until a GREEN, MERGEABLE PR URL has been delivered to the user.**
 
 ## Code Standards
 
