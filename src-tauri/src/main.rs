@@ -1,5 +1,5 @@
-// Prevents console window on Windows in release mode
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// Suppress console window on Windows (debugging via web UI and API)
+#![windows_subsystem = "windows"]
 
 fn main() {
     audiotester_app::run();
