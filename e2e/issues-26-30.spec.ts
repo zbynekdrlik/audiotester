@@ -5,14 +5,37 @@ import { restartAudioEngine } from "./helpers/vban-text";
 const isHardwareTest = process.env.AUDIOTESTER_HARDWARE_TEST === "true";
 const vbmatrixHost = process.env.AUDIOTESTER_HOST || "iem.lan";
 
+/**
+ * Helper: check if ASIO devices are available (skip on CI without hardware)
+ */
+async function requireDevice(
+  request: import("@playwright/test").APIRequestContext,
+): Promise<string | null> {
+  const devResp = await request.get("/api/v1/devices");
+  const devices = await devResp.json();
+  if (devices.length === 0) return null;
+  return devices[0].name;
+}
+
 // Issue #30: Stop then start can't reconnect to VASIO-8
 test.describe("Issue #30: Stop/Start Reconnection", () => {
   test("stop then start monitoring resumes successfully", async ({
     request,
   }) => {
-    // Get initial status
-    const statusBefore = await request.get("/api/v1/status");
-    const before = await statusBefore.json();
+    const deviceName = await requireDevice(request);
+    if (!deviceName) {
+      test.skip(true, "No ASIO devices available");
+      return;
+    }
+
+    // Select device first
+    await request.patch("/api/v1/config", {
+      data: { device: deviceName },
+    });
+
+    // Start monitoring to have something to stop
+    await request.post("/api/v1/monitoring", { data: { enabled: true } });
+    await new Promise((r) => setTimeout(r, 1000));
 
     // Stop monitoring
     const stopResp = await request.post("/api/v1/monitoring", {
@@ -37,6 +60,17 @@ test.describe("Issue #30: Stop/Start Reconnection", () => {
   test("start after stop returns valid stats within 5s", async ({
     request,
   }) => {
+    const deviceName = await requireDevice(request);
+    if (!deviceName) {
+      test.skip(true, "No ASIO devices available");
+      return;
+    }
+
+    // Select device
+    await request.patch("/api/v1/config", {
+      data: { device: deviceName },
+    });
+
     // Stop
     await request.post("/api/v1/monitoring", { data: { enabled: false } });
     await new Promise((r) => setTimeout(r, 2000));
@@ -47,19 +81,6 @@ test.describe("Issue #30: Stop/Start Reconnection", () => {
     });
     expect(startResp.ok()).toBeTruthy();
 
-    // Wait up to 5s for valid measurements
-    let gotMeasurement = false;
-    for (let i = 0; i < 10; i++) {
-      await new Promise((r) => setTimeout(r, 500));
-      const resp = await request.get("/api/v1/stats");
-      const stats = await resp.json();
-      if (stats.measurement_count > 0 && stats.current_latency > 0) {
-        gotMeasurement = true;
-        break;
-      }
-    }
-
-    // On CI without ASIO, measurement_count may stay 0 - that's OK
     // The key test is that start succeeded (didn't return error)
     const status = await request.get("/api/v1/status");
     const body = await status.json();
@@ -67,7 +88,7 @@ test.describe("Issue #30: Stop/Start Reconnection", () => {
   });
 
   test("double stop is idempotent", async ({ request }) => {
-    // Stop twice - should not error
+    // Stop twice - should not error (works even without device)
     const resp1 = await request.post("/api/v1/monitoring", {
       data: { enabled: false },
     });
@@ -82,6 +103,17 @@ test.describe("Issue #30: Stop/Start Reconnection", () => {
   });
 
   test("double start is idempotent", async ({ request }) => {
+    const deviceName = await requireDevice(request);
+    if (!deviceName) {
+      test.skip(true, "No ASIO devices available");
+      return;
+    }
+
+    // Select device
+    await request.patch("/api/v1/config", {
+      data: { device: deviceName },
+    });
+
     // Ensure stopped first
     await request.post("/api/v1/monitoring", { data: { enabled: false } });
     await new Promise((r) => setTimeout(r, 1000));
@@ -141,7 +173,7 @@ test.describe("Issue #26: Latency Measurement Stability", () => {
     const baseline = await baseResp.json();
     const baselineLatency = baseline.current_latency;
 
-    // Only test if we have a valid baseline
+    // Only test if we have a valid baseline (hardware with active signal)
     if (baselineLatency > 0 && baselineLatency < 100) {
       // Stop and restart
       await request.post("/api/v1/monitoring", { data: { enabled: false } });
