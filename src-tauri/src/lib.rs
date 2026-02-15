@@ -127,8 +127,9 @@ pub fn run() {
 /// `AUDIOTESTER_AUTO_START` to set up the audio engine without
 /// manual web UI interaction.
 async fn auto_configure(engine: EngineHandle) {
-    // Wait for ASIO subsystem to initialize after boot/reboot
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // Wait for ASIO subsystem to initialize after boot/reboot.
+    // VBMatrix may take 30-60s to fully start after Windows login.
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // Set sample rate if specified (trim to handle batch file whitespace)
     if let Ok(rate_str) = std::env::var("AUDIOTESTER_SAMPLE_RATE") {
@@ -152,7 +153,7 @@ async fn auto_configure(engine: EngineHandle) {
         // Select device and start monitoring with retries
         // After reboot, ASIO drivers may need time to fully initialize,
         // so we retry the full select+start cycle
-        for attempt in 1..=10 {
+        for attempt in 1..=20 {
             // Re-select device each attempt (fresh ASIO host handle)
             match engine.select_device(device_name.clone()).await {
                 Ok(()) => {
@@ -179,17 +180,11 @@ async fn auto_configure(engine: EngineHandle) {
                 }
             }
 
-            // Exponential backoff: 2s, 2s, 3s, 4s, 5s, 5s, 5s, 5s, 5s, 5s
-            let delay = match attempt {
-                1..=2 => 2,
-                3 => 3,
-                4 => 4,
-                _ => 5,
-            };
-            tokio::time::sleep(Duration::from_secs(delay)).await;
+            // 5s between each attempt, total retry window ~110s
+            tokio::time::sleep(Duration::from_secs(5)).await;
         }
 
-        tracing::error!(device = %device_name, "Failed to auto-configure after 10 attempts");
+        tracing::error!(device = %device_name, "Failed to auto-configure after 20 attempts");
     } else if auto_start {
         tracing::info!("Auto-starting monitoring (no device specified)");
         match engine.start().await {

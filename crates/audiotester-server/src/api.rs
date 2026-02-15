@@ -310,6 +310,11 @@ pub async fn toggle_monitoring(
 
     if req.enabled {
         if current.state != EngineState::Running {
+            // Re-select device to get a fresh ASIO handle before starting.
+            // After reboot or driver restart, the stored handle may be stale.
+            if let Some(ref device) = current.device_name {
+                let _ = state.engine.select_device(device.clone()).await;
+            }
             state.engine.start().await.map_err(|e| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
