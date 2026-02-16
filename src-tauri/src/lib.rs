@@ -259,7 +259,7 @@ const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
 /// VBMatrix needs several seconds to fully restart its audio engine.
 /// Reconnecting too early gives non-deterministic buffer phase (±128 samples).
 /// 5s is conservative: VBMatrix typically settles in 2-3s after restart.
-const ASIO_RESTART_SETTLE_MS: u64 = 5000;
+const ASIO_RESTART_SETTLE_MS: u64 = 10000;
 
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
