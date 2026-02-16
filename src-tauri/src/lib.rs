@@ -256,10 +256,11 @@ const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
 
 /// Delay after stopping ASIO before reconnecting (issue #26).
-/// VBMatrix needs several seconds to fully restart its audio engine.
-/// Reconnecting too early gives non-deterministic buffer phase (±128 samples).
-/// 5s is conservative: VBMatrix typically settles in 2-3s after restart.
-const ASIO_RESTART_SETTLE_MS: u64 = 5000;
+/// VBMatrix does a multi-stage restart: the first stage takes ~2-3s, but a
+/// second phase realignment can occur ~10s later.  15s covers both stages.
+/// A fresh ASIO connection to a fully-settled VBMatrix always gives a
+/// deterministic buffer phase (proven by manual tests on iem.lan).
+const ASIO_RESTART_SETTLE_MS: u64 = 15000;
 
 /// Phase drift threshold in milliseconds (issue #26).
 /// ASIO double-buffering causes the buffer phase to toggle on each fresh
