@@ -24,14 +24,33 @@ pub fn run() {
         tracing::error!("PANIC: {}", info);
     }));
 
-    // Initialize logging
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("audiotester=info".parse().unwrap()),
-        )
+    // Initialize file-based logging with daily rotation
+    let log_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("audiotester")
+        .join("logs");
+    std::fs::create_dir_all(&log_dir).ok();
+
+    let file_appender = tracing_appender::rolling::daily(&log_dir, "audiotester.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(non_blocking)
+        .with_ansi(false);
+
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env()
+        .add_directive("audiotester=debug".parse().unwrap())
+        .add_directive("audiotester_core=debug".parse().unwrap())
+        .add_directive("audiotester_server=info".parse().unwrap());
+
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(file_layer)
         .init();
 
+    tracing::info!(log_dir = %log_dir.display(), "Logging initialized");
     tracing::info!("Starting Audiotester v{}", audiotester_core::VERSION);
 
     // Set process priority to HIGH for audio stability (prevents ASIO callback starvation
@@ -57,7 +76,7 @@ pub fn run() {
     let stats = Arc::new(Mutex::new(StatsStore::new()));
 
     let config = ServerConfig::default();
-    let state = AppState::new(engine.clone(), Arc::clone(&stats), config);
+    let state = AppState::new(engine.clone(), Arc::clone(&stats), config, Some(log_dir));
 
     // Single Tokio runtime for all async tasks
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -228,6 +247,13 @@ fn calculate_backoff_ms(attempt: u32) -> u64 {
 /// Maximum number of reconnection attempts before requiring manual intervention
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
+/// Threshold for logging large lost sample spikes (issue #26).
+/// VBMatrix audio engine restarts cause brief disruptions (~0-400ms)
+/// that the ASIO streams survive. The measurement naturally adapts to the
+/// new VBMatrix routing phase without engine restart. Large spikes are
+/// logged for diagnostic visibility.
+const LOST_SAMPLES_LOG_THRESHOLD: usize = 100;
+
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
 /// Includes auto-reconnection with exponential backoff. When the audio engine
@@ -299,9 +325,62 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             }
         }
 
+        // Check for ASIO stream invalidation (issue #26):
+        // cpal 0.17 fires StreamError::StreamInvalidated when the ASIO driver
+        // sends kAsioResetRequest (e.g. VBMatrix "Restart Audio Engine").
+        // When detected, do a full engine restart for clean measurement state.
+        if let Ok(true) = engine.is_stream_invalidated().await {
+            tracing::warn!("ASIO stream invalidated (driver reset detected), restarting engine");
+
+            // Full engine restart: stop → re-select device → start
+            if let Err(e) = engine.stop().await {
+                tracing::debug!(error = %e, "Stop during stream invalidation recovery");
+            }
+
+            // Brief pause for ASIO driver to settle
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            if let Some(ref device) = last_device_name {
+                if let Err(e) = engine.select_device(device.clone()).await {
+                    tracing::warn!(error = %e, "Failed to re-select device after stream invalidation");
+                }
+            }
+
+            match engine.start().await {
+                Ok(()) => {
+                    tracing::info!("Engine restarted after ASIO stream invalidation");
+                    last_successful_analysis = None;
+                    signal_lost = false;
+                    signal_lost_since = None;
+                    if let Ok(mut store) = stats.lock() {
+                        store.set_signal_lost(false);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to restart engine after stream invalidation");
+                }
+            }
+            continue;
+        }
+
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
+                // Log large lost sample spikes for diagnostic visibility.
+                // VBMatrix audio engine restarts cause brief disruptions where
+                // ASIO streams survive but counter channel shows gaps. The latency
+                // measurement naturally adapts to the new VBMatrix routing phase
+                // without requiring engine restart. Engine restart is avoided because
+                // it introduces non-deterministic ASIO buffer phase alignment (±128
+                // samples) without fixing the VBMatrix-side phase change (issue #26).
+                if result.lost_samples > LOST_SAMPLES_LOG_THRESHOLD {
+                    tracing::warn!(
+                        lost_samples = result.lost_samples,
+                        latency_ms = %format!("{:.3}", result.latency_ms),
+                        "Large sample loss detected (possible VBMatrix restart)"
+                    );
+                }
+
                 // Check if signal is valid:
                 // 1. Latency must be in valid range (1-100ms for loopback)
                 //    - >100ms indicates MLS period aliasing (no real correlation peak)
@@ -316,15 +395,19 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
                     // Reset signal_lost if it was set
                     if signal_lost {
+                        let lost_duration = signal_lost_since
+                            .map(|t| t.elapsed().as_millis())
+                            .unwrap_or(0);
                         signal_lost = false;
                         signal_lost_since = None;
                         if let Ok(mut store) = stats.lock() {
                             store.set_signal_lost(false);
                         }
                         tracing::info!(
-                            "Signal restored (latency: {:.2}ms, confidence: {:.2})",
-                            result.latency_ms,
-                            result.confidence
+                            latency_ms = %format!("{:.6}", result.latency_ms),
+                            confidence = %format!("{:.3}", result.confidence),
+                            lost_duration_ms = lost_duration,
+                            "signal_recovered"
                         );
                     }
                 } else if !signal_lost {
@@ -335,9 +418,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         store.set_signal_lost(true);
                     }
                     tracing::warn!(
-                        "No signal detected (latency: {:.2}ms, confidence: {:.2})",
-                        result.latency_ms,
-                        result.confidence
+                        latency_ms = %format!("{:.6}", result.latency_ms),
+                        confidence = %format!("{:.3}", result.confidence),
+                        "signal_lost"
                     );
                 }
 
@@ -366,6 +449,12 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 if let Ok(mut store) = stats.lock() {
                     store.record_latency(result.latency_ms);
                     store.set_confidence(result.confidence);
+                    tracing::debug!(
+                        latency_ms = %format!("{:.6}", result.latency_ms),
+                        confidence = %format!("{:.3}", result.confidence),
+                        lost = result.lost_samples,
+                        "stats_recorded"
+                    );
                     if result.lost_samples > 0 {
                         store.record_loss(result.lost_samples as u64);
                     }

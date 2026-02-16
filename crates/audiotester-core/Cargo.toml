@@ -8,7 +8,7 @@ license = "MIT"
 
 [dependencies]
 # Audio I/O with ASIO support
-cpal = { version = "0.15", features = ["asio"] }
+cpal = { version = "0.17", features = ["asio"] }
 
 # Lock-free ring buffer for audio
 ringbuf = "0.4"
