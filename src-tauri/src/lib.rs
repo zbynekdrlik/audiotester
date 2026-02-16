@@ -270,6 +270,12 @@ const ASIO_RESTART_SETTLE_MS: u64 = 5000;
 /// false-triggering on normal jitter (±0.02 ms).
 const PHASE_DRIFT_THRESHOLD_MS: f64 = 0.8;
 
+/// Cooldown after ASIO restart recovery (issue #26).
+/// After a successful reconnection (with or without phase toggle), ignore
+/// subsequent lost_samples spikes for this duration.  Prevents cascading
+/// restarts when VBMatrix or the ASIO driver are still settling.
+const ASIO_RESTART_COOLDOWN_SECS: u64 = 30;
+
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
 /// Includes auto-reconnection with exponential backoff. When the audio engine
@@ -296,6 +302,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut pre_restart_latency: Option<f64> = None;
     let mut asio_restart_in_progress = false;
     let mut valid_measurement_seen = false;
+    let mut asio_restart_cooldown_until: Option<std::time::Instant> = None;
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
     if APP_HANDLE.get().is_none() {
@@ -395,7 +402,14 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 // causes ~14000-17000 lost samples in a single cycle.
                 // Skip on initial startup (first few cycles often show lost
                 // samples before the analyzer has established a baseline).
-                if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD && valid_measurement_seen {
+                // Also skip during cooldown after a recent recovery.
+                let in_cooldown = asio_restart_cooldown_until
+                    .map(|t| t > std::time::Instant::now())
+                    .unwrap_or(false);
+                if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD
+                    && valid_measurement_seen
+                    && !in_cooldown
+                {
                     // Use last_stable_latency for phase verification (not the
                     // current result, which may be corrupted by the restart).
                     // ASIO double-buffering toggles the buffer phase on each
@@ -474,6 +488,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     // threshold, do one extra reconnect to toggle the phase back.
                     if asio_restart_in_progress {
                         asio_restart_in_progress = false;
+                        // Start cooldown to prevent cascading restarts.
+                        asio_restart_cooldown_until = Some(
+                            std::time::Instant::now()
+                                + Duration::from_secs(ASIO_RESTART_COOLDOWN_SECS),
+                        );
                         if let Some(old_lat) = pre_restart_latency.take() {
                             let drift = (result.latency_ms - old_lat).abs();
                             if drift > PHASE_DRIFT_THRESHOLD_MS {
