@@ -262,19 +262,10 @@ const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
 /// deterministic buffer phase (proven by manual tests on iem.lan).
 const ASIO_RESTART_SETTLE_MS: u64 = 15000;
 
-/// Phase drift threshold in milliseconds (issue #26).
-/// ASIO double-buffering causes the buffer phase to toggle on each fresh
-/// connection.  After reconnecting we compare the new latency to the
-/// pre-restart value.  If the difference exceeds this threshold we do one
-/// extra reconnect to toggle the phase back.  At 96 kHz / 128-frame buffer
-/// the phase shift is 1.333 ms, so 0.8 ms catches it reliably without
-/// false-triggering on normal jitter (±0.02 ms).
-const PHASE_DRIFT_THRESHOLD_MS: f64 = 0.8;
-
 /// Cooldown after ASIO restart recovery (issue #26).
-/// After a successful reconnection (with or without phase toggle), ignore
-/// subsequent lost_samples spikes for this duration.  Prevents cascading
-/// restarts when VBMatrix or the ASIO driver are still settling.
+/// After a successful reconnection, ignore subsequent lost_samples spikes
+/// for this duration.  Prevents cascading restarts when VBMatrix or the
+/// ASIO driver are still settling.
 const ASIO_RESTART_COOLDOWN_SECS: u64 = 30;
 
 /// Main monitoring loop - analyzes audio and broadcasts stats
@@ -295,13 +286,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut signal_lost = false;
     let mut signal_lost_since: Option<std::time::Instant> = None;
     let mut reconnect_start: Option<std::time::Instant> = None;
-    // Phase verification state for ASIO restart recovery (issue #26).
-    // ASIO double-buffering toggles the buffer phase on each fresh connection.
-    // We track the last stable latency continuously and use it as the reference
-    // for phase verification after reconnection.
-    let mut last_stable_latency: Option<f64> = None;
-    let mut pre_restart_latency: Option<f64> = None;
-    let mut asio_restart_in_progress = false;
+    // ASIO restart recovery state (issue #26).
     let mut valid_measurement_seen = false;
     let mut asio_restart_cooldown_until: Option<std::time::Instant> = None;
 
@@ -411,15 +396,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     && valid_measurement_seen
                     && !in_cooldown
                 {
-                    // Use last_stable_latency for phase verification (not the
-                    // current result, which may be corrupted by the restart).
-                    // ASIO double-buffering toggles the buffer phase on each
-                    // fresh connection (±128 samples = ±1.33ms at 96kHz).
-                    // After reconnecting we compare to this value; if the phase
-                    // drifted we do one extra reconnect to toggle it back.
-                    pre_restart_latency = last_stable_latency;
-                    asio_restart_in_progress = true;
-
                     tracing::warn!(
                         lost_samples = result.lost_samples,
                         latency_ms = %format!("{:.3}", result.latency_ms),
@@ -432,13 +408,19 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     }
 
                     // Step 2: Wait for VBMatrix to fully settle.
+                    // VBMatrix does a multi-stage restart (~10s total).
+                    // Reconnecting before it's fully settled gives an unstable
+                    // buffer phase that can shift mid-stream.
                     tracing::info!(
                         settle_ms = ASIO_RESTART_SETTLE_MS,
                         "Waiting for ASIO driver to settle before reconnecting"
                     );
                     tokio::time::sleep(Duration::from_millis(ASIO_RESTART_SETTLE_MS)).await;
 
-                    // Step 3: Fresh ASIO connection
+                    // Step 3: Fresh ASIO connection to fully-settled VBMatrix.
+                    // The latency may shift by ±1 ASIO buffer (±128 samples =
+                    // ±1.33ms at 96kHz) compared to before the restart.  This
+                    // is expected ASIO behavior and the measurement is stable.
                     if let Some(ref device) = last_device_name {
                         if let Err(e) = engine.select_device(device.clone()).await {
                             tracing::warn!(error = %e, "Failed to re-select device after ASIO restart");
@@ -447,20 +429,21 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
                     match engine.start().await {
                         Ok(()) => {
-                            tracing::info!(
-                                "Engine reconnected after ASIO driver restart, verifying phase"
-                            );
+                            tracing::info!("Engine reconnected after ASIO driver restart");
                             last_successful_analysis = None;
                             signal_lost = false;
                             signal_lost_since = None;
                             if let Ok(mut store) = stats.lock() {
                                 store.set_signal_lost(false);
                             }
+                            // Start cooldown to prevent cascading restarts.
+                            asio_restart_cooldown_until = Some(
+                                std::time::Instant::now()
+                                    + Duration::from_secs(ASIO_RESTART_COOLDOWN_SECS),
+                            );
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to reconnect after ASIO driver restart");
-                            asio_restart_in_progress = false;
-                            pre_restart_latency = None;
                         }
                     }
                     continue;
@@ -481,65 +464,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
 
                     // Update last successful analysis time only for valid signals
                     last_successful_analysis = Some(std::time::Instant::now());
-
-                    // Phase verification after ASIO restart recovery (issue #26).
-                    // ASIO double-buffering toggles the buffer phase on each
-                    // fresh connection.  Compare first post-reconnect latency to
-                    // the pre-restart value.  If it drifted by more than the
-                    // threshold, do one extra reconnect to toggle the phase back.
-                    if asio_restart_in_progress {
-                        asio_restart_in_progress = false;
-                        // Start cooldown to prevent cascading restarts.
-                        asio_restart_cooldown_until = Some(
-                            std::time::Instant::now()
-                                + Duration::from_secs(ASIO_RESTART_COOLDOWN_SECS),
-                        );
-                        if let Some(old_lat) = pre_restart_latency.take() {
-                            let drift = (result.latency_ms - old_lat).abs();
-                            if drift > PHASE_DRIFT_THRESHOLD_MS {
-                                tracing::warn!(
-                                    old_latency_ms = %format!("{:.3}", old_lat),
-                                    new_latency_ms = %format!("{:.3}", result.latency_ms),
-                                    drift_ms = %format!("{:.3}", drift),
-                                    "Phase drift detected after ASIO reconnect, toggling phase"
-                                );
-
-                                // Quick reconnect to toggle the buffer phase.
-                                // VBMatrix is already settled, but the ASIO driver
-                                // needs time to fully release before reconnecting.
-                                if let Err(e) = engine.stop().await {
-                                    tracing::debug!(error = %e, "Stop during phase toggle");
-                                }
-                                tokio::time::sleep(Duration::from_millis(2000)).await;
-                                if let Some(ref device) = last_device_name {
-                                    if let Err(e) = engine.select_device(device.clone()).await {
-                                        tracing::warn!(error = %e, "Failed to re-select device during phase toggle");
-                                    }
-                                }
-                                match engine.start().await {
-                                    Ok(()) => {
-                                        tracing::info!("Engine reconnected after phase toggle");
-                                        last_successful_analysis = None;
-                                        signal_lost = false;
-                                        signal_lost_since = None;
-                                        if let Ok(mut store) = stats.lock() {
-                                            store.set_signal_lost(false);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        tracing::error!(error = %e, "Failed to reconnect during phase toggle");
-                                    }
-                                }
-                                continue;
-                            } else {
-                                tracing::info!(
-                                    latency_ms = %format!("{:.3}", result.latency_ms),
-                                    drift_ms = %format!("{:.3}", drift),
-                                    "Phase verified after ASIO reconnect, no toggle needed"
-                                );
-                            }
-                        }
-                    }
 
                     // Reset signal_lost if it was set
                     if signal_lost {
@@ -592,12 +516,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     }
                 }
                 consecutive_failures = 0;
-
-                // Track last stable latency for phase verification (issue #26).
-                // Only update when there are no lost samples (clean measurement).
-                if result.lost_samples == 0 {
-                    last_stable_latency = Some(result.latency_ms);
-                }
 
                 // Record to stats store (preserve existing data - no clear!)
                 if let Ok(mut store) = stats.lock() {
@@ -740,7 +658,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // This handles ASIO driver restarts (e.g. VBMatrix buffer changes)
         // where streams stay alive but receive silence.
         // Suppressed during ASIO restart recovery (which has its own settle/reconnect).
-        if signal_lost && !reconnect_in_progress && !asio_restart_in_progress {
+        if signal_lost && !reconnect_in_progress {
             if let Some(lost_since) = signal_lost_since {
                 if lost_since.elapsed() > Duration::from_secs(10) {
                     tracing::warn!("Signal lost for >10s, attempting ASIO reconnection");
