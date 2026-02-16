@@ -126,7 +126,13 @@ impl LatencyAnalyzer {
             self.pending_bursts.pop_front();
         }
 
+        let frame = event.start_frame;
         self.pending_bursts.push_back(event);
+        tracing::trace!(
+            frame = frame,
+            pending = self.pending_bursts.len(),
+            "burst_registered"
+        );
     }
 
     /// Match a detection event with a pending burst using frame arithmetic
@@ -158,9 +164,18 @@ impl LatencyAnalyzer {
         if let Some(i) = matched_index {
             let burst = self.pending_bursts.remove(i).unwrap();
             // Discard all older bursts (they're stale)
-            self.pending_bursts
-                .drain(..i.min(self.pending_bursts.len()));
+            let drain_count = i.min(self.pending_bursts.len());
+            self.pending_bursts.drain(..drain_count);
             let result = self.calculate_latency_from_frames(&burst, detection);
+            tracing::debug!(
+                detection_frame = detection.input_frame,
+                burst_frame = burst.start_frame,
+                frame_diff = detection.input_frame - burst.start_frame,
+                latency_ms = %format!("{:.6}", result.latency_ms),
+                pending_after = self.pending_bursts.len(),
+                measurement = self.measurement_count,
+                "latency_matched"
+            );
             self.last_result = Some(result.clone());
             return Some(result);
         }
@@ -169,6 +184,12 @@ impl LatencyAnalyzer {
         self.pending_bursts.retain(|b| {
             detection.input_frame.saturating_sub(b.start_frame) < max_latency_frames * 2
         });
+
+        tracing::trace!(
+            detection_frame = detection.input_frame,
+            pending_count = self.pending_bursts.len(),
+            "no_burst_match"
+        );
 
         None
     }
@@ -483,6 +504,44 @@ mod tests {
         assert_eq!(analyzer.pending_burst_count(), 0);
         assert_eq!(analyzer.measurement_count(), 0);
         assert!(analyzer.last_result().is_none());
+    }
+
+    #[test]
+    fn test_reset_gives_fresh_measurements() {
+        // After reset(), measurements start fresh with no stale state
+        let mut analyzer = LatencyAnalyzer::new(96000);
+
+        // Build up state at frame_diff=800
+        for i in 0..20 {
+            let burst = BurstEvent {
+                start_frame: i * 9600,
+            };
+            analyzer.register_burst(burst);
+            let detection = DetectionEvent {
+                input_frame: i * 9600 + 800,
+            };
+            analyzer.match_detection(&detection);
+        }
+        assert_eq!(analyzer.measurement_count(), 20);
+        assert!(analyzer.pending_burst_count() == 0);
+
+        // Reset clears everything
+        analyzer.reset();
+        assert_eq!(analyzer.measurement_count(), 0);
+        assert_eq!(analyzer.pending_burst_count(), 0);
+        assert!(analyzer.last_result().is_none());
+
+        // New measurements start fresh - can have any frame_diff
+        let burst = BurstEvent {
+            start_frame: 100 * 9600,
+        };
+        analyzer.register_burst(burst);
+        let detection = DetectionEvent {
+            input_frame: 100 * 9600 + 800,
+        };
+        let result = analyzer.match_detection(&detection).unwrap();
+        assert_eq!(result.latency_samples, 800);
+        assert_eq!(analyzer.measurement_count(), 1);
     }
 
     #[test]

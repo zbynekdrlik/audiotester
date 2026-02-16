@@ -46,6 +46,9 @@ pub enum EngineCommand {
     GetSampleCounts {
         reply: oneshot::Sender<(usize, usize)>,
     },
+    IsStreamInvalidated {
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Engine status snapshot (safe to send between threads)
@@ -99,6 +102,9 @@ impl EngineHandle {
                     }
                     EngineCommand::GetSampleCounts { reply } => {
                         let _ = reply.send(engine.sample_counts());
+                    }
+                    EngineCommand::IsStreamInvalidated { reply } => {
+                        let _ = reply.send(engine.is_stream_invalidated());
                     }
                 }
             }
@@ -180,6 +186,18 @@ impl EngineHandle {
             .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
         rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
     }
+
+    /// Check if the ASIO driver sent a stream invalidation (kAsioResetRequest).
+    ///
+    /// Returns true when the driver has reset and streams need to be rebuilt.
+    pub async fn is_stream_invalidated(&self) -> anyhow::Result<bool> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::IsStreamInvalidated { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
 }
 
 /// Shared application state accessible from all handlers
@@ -193,6 +211,8 @@ pub struct AppState {
     pub ws_tx: tokio::sync::broadcast::Sender<String>,
     /// Server configuration
     pub config: ServerConfig,
+    /// Log directory for diagnostic file logging
+    pub log_dir: Option<std::path::PathBuf>,
 }
 
 /// Server configuration
@@ -215,13 +235,19 @@ impl Default for ServerConfig {
 
 impl AppState {
     /// Create a new AppState with the given engine handle and stats store
-    pub fn new(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, config: ServerConfig) -> Self {
+    pub fn new(
+        engine: EngineHandle,
+        stats: Arc<Mutex<StatsStore>>,
+        config: ServerConfig,
+        log_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
             engine,
             stats,
             ws_tx,
             config,
+            log_dir,
         }
     }
 }
@@ -257,6 +283,8 @@ pub fn build_router(state: AppState) -> Router {
             "/api/v1/remote-url",
             axum::routing::get(api::get_remote_url),
         )
+        // Diagnostic logs
+        .route("/api/v1/logs", axum::routing::get(api::get_logs))
         // WebSocket
         .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
         // PWA manifest
