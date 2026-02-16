@@ -247,12 +247,12 @@ fn calculate_backoff_ms(attempt: u32) -> u64 {
 /// Maximum number of reconnection attempts before requiring manual intervention
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-/// Lost samples threshold for detecting virtual ASIO driver resets (issue #26).
-/// When VBMatrix restarts its audio engine, the VASIO-8 virtual driver does NOT
-/// send kAsioResetRequest (so StreamError::StreamInvalidated never fires).
-/// However, the restart causes ~14000 lost samples in a single analysis cycle.
-/// We use this as a fallback detection: full engine restart restores clean phase.
-const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
+/// Threshold for logging large lost sample spikes (issue #26).
+/// VBMatrix audio engine restarts cause brief disruptions (~0-400ms)
+/// that the ASIO streams survive. The measurement naturally adapts to the
+/// new VBMatrix routing phase without engine restart. Large spikes are
+/// logged for diagnostic visibility.
+const LOST_SAMPLES_LOG_THRESHOLD: usize = 100;
 
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
@@ -366,53 +366,19 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
-                // Fallback ASIO driver restart detection (issue #26):
-                // Virtual ASIO drivers like VASIO-8 don't send kAsioResetRequest,
-                // so StreamError::StreamInvalidated never fires. The only observable
-                // signal is a massive lost_samples spike (~14000) in one analysis cycle.
-                // Full engine restart restores clean I/O buffer phase alignment.
-                if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD {
+                // Log large lost sample spikes for diagnostic visibility.
+                // VBMatrix audio engine restarts cause brief disruptions where
+                // ASIO streams survive but counter channel shows gaps. The latency
+                // measurement naturally adapts to the new VBMatrix routing phase
+                // without requiring engine restart. Engine restart is avoided because
+                // it introduces non-deterministic ASIO buffer phase alignment (±128
+                // samples) without fixing the VBMatrix-side phase change (issue #26).
+                if result.lost_samples > LOST_SAMPLES_LOG_THRESHOLD {
                     tracing::warn!(
                         lost_samples = result.lost_samples,
                         latency_ms = %format!("{:.3}", result.latency_ms),
-                        "ASIO driver restart detected (lost samples), restarting engine"
+                        "Large sample loss detected (possible VBMatrix restart)"
                     );
-
-                    if let Err(e) = engine.stop().await {
-                        tracing::debug!(error = %e, "Stop during ASIO restart recovery");
-                    }
-
-                    // Wait for VBMatrix to fully settle after its audio engine restart.
-                    // VBMatrix takes 1-2s to restart; starting ASIO streams too early
-                    // causes non-deterministic buffer phase alignment (±128 samples).
-                    // 3s is conservative: ensures VBMatrix is fully stable before
-                    // we create fresh ASIO streams with correct I/O phase.
-                    tracing::info!("Waiting 3s for ASIO driver to settle before restart");
-                    tokio::time::sleep(Duration::from_millis(3000)).await;
-
-                    if let Some(ref device) = last_device_name {
-                        if let Err(e) = engine.select_device(device.clone()).await {
-                            tracing::warn!(error = %e, "Failed to re-select device after ASIO restart");
-                        }
-                    }
-
-                    match engine.start().await {
-                        Ok(()) => {
-                            tracing::info!(
-                                "Engine restarted after ASIO driver reset (lost samples)"
-                            );
-                            last_successful_analysis = None;
-                            signal_lost = false;
-                            signal_lost_since = None;
-                            if let Ok(mut store) = stats.lock() {
-                                store.set_signal_lost(false);
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to restart engine after ASIO driver reset");
-                        }
-                    }
-                    continue;
                 }
 
                 // Check if signal is valid:
