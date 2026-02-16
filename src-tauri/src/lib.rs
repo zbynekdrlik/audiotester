@@ -247,12 +247,19 @@ fn calculate_backoff_ms(attempt: u32) -> u64 {
 /// Maximum number of reconnection attempts before requiring manual intervention
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-/// Threshold for logging large lost sample spikes (issue #26).
-/// VBMatrix audio engine restarts cause brief disruptions (~0-400ms)
-/// that the ASIO streams survive. The measurement naturally adapts to the
-/// new VBMatrix routing phase without engine restart. Large spikes are
-/// logged for diagnostic visibility.
-const LOST_SAMPLES_LOG_THRESHOLD: usize = 100;
+/// Lost samples threshold for detecting virtual ASIO driver restarts (issue #26).
+/// When VBMatrix restarts its audio engine, VASIO-8 does NOT send
+/// kAsioResetRequest. Instead, ~14000-17000 samples are lost in one cycle.
+/// Detection triggers a full engine restart: stop ASIO → wait for VBMatrix
+/// to settle → reconnect fresh. A fresh ASIO connection to a settled
+/// VBMatrix always produces consistent buffer phase alignment.
+const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
+
+/// Delay after stopping ASIO before reconnecting (issue #26).
+/// VBMatrix needs several seconds to fully restart its audio engine.
+/// Reconnecting too early gives non-deterministic buffer phase (±128 samples).
+/// 5s is conservative: VBMatrix typically settles in 2-3s after restart.
+const ASIO_RESTART_SETTLE_MS: u64 = 5000;
 
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
@@ -366,19 +373,55 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
-                // Log large lost sample spikes for diagnostic visibility.
-                // VBMatrix audio engine restarts cause brief disruptions where
-                // ASIO streams survive but counter channel shows gaps. The latency
-                // measurement naturally adapts to the new VBMatrix routing phase
-                // without requiring engine restart. Engine restart is avoided because
-                // it introduces non-deterministic ASIO buffer phase alignment (±128
-                // samples) without fixing the VBMatrix-side phase change (issue #26).
-                if result.lost_samples > LOST_SAMPLES_LOG_THRESHOLD {
+                // Detect virtual ASIO driver restart via lost samples (issue #26).
+                // VASIO-8 doesn't send kAsioResetRequest, but VBMatrix restart
+                // causes ~14000-17000 lost samples. Fix: disconnect ASIO, wait
+                // for VBMatrix to fully settle, reconnect fresh. A fresh ASIO
+                // connection to a settled VBMatrix always gives consistent phase
+                // (proven by stop→restart→start test on iem.lan: 3/3 consistent).
+                if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD {
                     tracing::warn!(
                         lost_samples = result.lost_samples,
                         latency_ms = %format!("{:.3}", result.latency_ms),
-                        "Large sample loss detected (possible VBMatrix restart)"
+                        "ASIO driver restart detected (lost samples), reconnecting"
                     );
+
+                    // Step 1: Release ASIO driver immediately
+                    if let Err(e) = engine.stop().await {
+                        tracing::debug!(error = %e, "Stop during ASIO restart recovery");
+                    }
+
+                    // Step 2: Wait for VBMatrix to fully settle.
+                    // This is the critical fix: VBMatrix needs time to complete
+                    // its audio engine restart. Too short = random buffer phase.
+                    tracing::info!(
+                        settle_ms = ASIO_RESTART_SETTLE_MS,
+                        "Waiting for ASIO driver to settle before reconnecting"
+                    );
+                    tokio::time::sleep(Duration::from_millis(ASIO_RESTART_SETTLE_MS)).await;
+
+                    // Step 3: Fresh ASIO connection (like starting audiotester new)
+                    if let Some(ref device) = last_device_name {
+                        if let Err(e) = engine.select_device(device.clone()).await {
+                            tracing::warn!(error = %e, "Failed to re-select device after ASIO restart");
+                        }
+                    }
+
+                    match engine.start().await {
+                        Ok(()) => {
+                            tracing::info!("Engine reconnected after ASIO driver restart");
+                            last_successful_analysis = None;
+                            signal_lost = false;
+                            signal_lost_since = None;
+                            if let Ok(mut store) = stats.lock() {
+                                store.set_signal_lost(false);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to reconnect after ASIO driver restart");
+                        }
+                    }
+                    continue;
                 }
 
                 // Check if signal is valid:
