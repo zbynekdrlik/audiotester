@@ -4,6 +4,36 @@
 
 Windows ASIO audio testing application for monitoring professional audio paths (Dante, VBAN, VBMatrix). The application runs as a Tauri 2 desktop app with system tray, web UI via Leptos SSR on Axum, and remote access from any browser on the LAN.
 
+## MANDATORY: Sync Before Any Branch Analysis (STRICTLY ENFORCED)
+
+**CRITICAL: The agent MUST run `git fetch origin` BEFORE any operation that compares branches.**
+
+This rule exists because a stale local `main` caused the agent to misidentify already-merged commits as new work, wasting hours of the user's time.
+
+### Rules
+
+1. **BEFORE `git log main..dev`** → run `git fetch origin main` first
+2. **BEFORE `git diff main dev`** → run `git fetch origin main` first
+3. **BEFORE creating a PR** → run `git fetch origin` first
+4. **BEFORE any branch reset/rebase** → run `git fetch origin` first
+5. **A SessionStart hook auto-fetches**, but the agent MUST ALSO fetch before manual branch comparisons
+
+### The Hook
+
+`.claude/settings.json` contains a SessionStart hook that fetches `origin/main` and warns if the current branch is behind. This runs automatically on every session start.
+
+### NEVER Trust Local Branch State
+
+```bash
+# WRONG - local main may be stale
+git log main..dev --oneline
+
+# CORRECT - always fetch first
+git fetch origin main && git log origin/main..dev --oneline
+```
+
+**If the agent skips fetching and provides wrong analysis, it is a critical failure.**
+
 ## Quality Philosophy: Real Hardware E2E Testing
 
 **CRITICAL: This project prioritizes E2E testing on REAL HARDWARE over all other testing methods.**
