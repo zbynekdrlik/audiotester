@@ -191,8 +191,26 @@
 
   // ─── Loss Timeline (Lightweight Charts) ───────────────────────────
 
+  // Convert UTC unix timestamp to local time for chart display.
+  // Lightweight Charts treats all timestamps as UTC, so we shift by
+  // the local timezone offset to show correct local times on the axis.
+  function timeToLocal(utcTimestamp) {
+    var d = new Date(utcTimestamp * 1000);
+    return (
+      Date.UTC(
+        d.getFullYear(),
+        d.getMonth(),
+        d.getDate(),
+        d.getHours(),
+        d.getMinutes(),
+        d.getSeconds(),
+      ) / 1000
+    );
+  }
+
   var lossChart = null;
   var lossHistogram = null;
+  var lossMarkers = null;
   var lossTimelineRange = "24h";
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
@@ -214,9 +232,11 @@
         timeVisible: true,
         secondsVisible: false,
         borderColor: "#2a2a4e",
+        rightOffset: 3,
       },
       rightPriceScale: {
         borderColor: "#2a2a4e",
+        mode: 1, // Logarithmic scale — large spikes don't squash small losses
       },
       crosshair: {
         mode: 0,
@@ -274,9 +294,10 @@
       })
       .then(function (data) {
         if (!lossHistogram || !data.buckets) return;
+        var bucketSize = data.bucket_size_secs || 300;
         var chartData = data.buckets.map(function (b) {
           return {
-            time: b.t,
+            time: timeToLocal(b.t),
             value: b.loss,
             color:
               b.loss > 1000
@@ -286,7 +307,42 @@
                   : "transparent",
           };
         });
+
+        // Ensure data extends to "now" so the right edge represents current time
+        var nowUtc = Math.floor(Date.now() / 1000);
+        var nowAligned = nowUtc - (nowUtc % bucketSize);
+        var nowLocal = timeToLocal(nowAligned);
+        if (
+          chartData.length > 0 &&
+          chartData[chartData.length - 1].time < nowLocal
+        ) {
+          chartData.push({ time: nowLocal, value: 0, color: "transparent" });
+        }
+
         lossHistogram.setData(chartData);
+
+        // Add "Now" marker at the current time position
+        var markerTime =
+          chartData.length > 0
+            ? chartData[chartData.length - 1].time
+            : nowLocal;
+        var markerDef = [
+          {
+            time: markerTime,
+            position: "aboveBar",
+            color: "#00d4ff",
+            shape: "arrowDown",
+            text: "Now",
+          },
+        ];
+        if (lossMarkers) {
+          lossMarkers.setMarkers(markerDef);
+        } else if (LightweightCharts.createSeriesMarkers) {
+          lossMarkers = LightweightCharts.createSeriesMarkers(
+            lossHistogram,
+            markerDef,
+          );
+        }
       })
       .catch(function (err) {
         console.error("Failed to fetch loss timeline:", err);
