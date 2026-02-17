@@ -221,7 +221,7 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     expect(finalStats.signal_lost).toBe(false);
   });
 
-  test("7: dashboard shows estimated loss during mute", async ({
+  test("7: dashboard shows ~combined loss during mute", async ({
     page,
     request,
   }) => {
@@ -244,16 +244,16 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     }
     expect(silenceDetected).toBe(true);
 
-    // Check that estimated-loss element is visible in the dashboard
-    const estimatedLossEl = page.locator('[data-testid="estimated-loss"]');
-    await expect(estimatedLossEl).toBeVisible({ timeout: 5000 });
+    // Wait for dashboard to update via WebSocket
+    await page.waitForTimeout(1000);
 
-    // Should contain "est." text
-    const text = await estimatedLossEl.textContent();
-    expect(text).toContain("est.");
+    // Lost value should show ~ prefix (combined total_lost + estimated_loss)
+    const lostEl = page.locator('[data-testid="lost-value"]');
+    const text = await lostEl.textContent();
+    expect(text).toMatch(/^~/);
   });
 
-  test("8: dashboard hides estimated loss after unmute", async ({
+  test("8: dashboard removes ~ prefix after unmute", async ({
     page,
     request,
   }) => {
@@ -275,18 +275,19 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     }
     expect(silenceDetected).toBe(true);
 
-    // Verify estimated-loss is visible
-    const estimatedLossEl = page.locator('[data-testid="estimated-loss"]');
-    await expect(estimatedLossEl).toBeVisible({ timeout: 5000 });
+    // Wait for dashboard to show ~ prefix
+    await page.waitForTimeout(1000);
+    const lostEl = page.locator('[data-testid="lost-value"]');
+    const textDuringMute = await lostEl.textContent();
+    expect(textDuringMute).toMatch(/^~/);
 
     // Unmute counter channel
     await unmuteCounterChannel(vbmatrixHost);
 
-    // Wait for estimated loss to disappear (up to 5s)
-    await expect(estimatedLossEl).toBeHidden({ timeout: 10000 });
+    // Wait for ~ prefix to disappear (up to 10s)
+    await expect(lostEl).not.toHaveText(/^~/, { timeout: 10000 });
 
     // Lost value should return to normal styling
-    const lostEl = page.locator('[data-testid="lost-value"]');
     const className = await lostEl.getAttribute("class");
     expect(className).not.toContain("warning");
   });
