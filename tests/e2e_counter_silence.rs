@@ -1,13 +1,16 @@
 //! E2E tests for counter channel silence detection
 //!
-//! Verifies that ch1 counter silence (muted loopback) is detected correctly,
-//! recovery produces zero false loss, and counter wrap-around doesn't trigger
+//! Verifies that ch1 counter silence (muted loopback) is detected correctly
+//! using non-incrementing counter detection. Works for all mute behaviors:
+//! exact zeros, low-level noise, stuck values.
+//!
+//! Recovery produces zero false loss, and counter wrap-around doesn't trigger
 //! false silence.
 
 use audiotester_core::audio::analyzer::{Analyzer, FrameLossResult};
 
 /// Test that feeding all-zero counter samples triggers silence detection
-/// after the threshold (sample_rate / 10 = 100ms worth of zeros).
+/// after the threshold (sample_rate / 10 = 100ms worth of non-incrementing samples).
 #[test]
 fn test_counter_silence_detection_48khz() {
     let sample_rate = 48000;
@@ -21,12 +24,12 @@ fn test_counter_silence_detection_48khz() {
         "Should not be silent with normal signal"
     );
 
-    // Now feed silence — need threshold = 48000/10 = 4800 consecutive zeros
+    // Now feed silence (all zeros = stuck counter) — need threshold = 48000/10 = 4800
     let silence = vec![0.0f32; 5000];
     let result = analyzer.detect_frame_loss(&silence);
     assert!(
         result.counter_silent,
-        "Should detect counter silence after {} zero samples at {}Hz",
+        "Should detect counter silence after {} stuck-zero samples at {}Hz",
         5000, sample_rate
     );
     assert_eq!(
@@ -45,8 +48,7 @@ fn test_counter_silence_detection_96khz() {
     let baseline: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
     let _ = analyzer.detect_frame_loss(&baseline);
 
-    // Feed silence — need threshold = 96000/10 = 9600 consecutive zeros
-    // Feed slightly more than threshold
+    // Feed silence (stuck zeros) — need threshold = 96000/10 = 9600
     let silence = vec![0.0f32; 10000];
     let result = analyzer.detect_frame_loss(&silence);
     assert!(
@@ -65,7 +67,7 @@ fn test_counter_silence_below_threshold() {
     let baseline: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
     let _ = analyzer.detect_frame_loss(&baseline);
 
-    // Feed fewer zeros than the threshold (4800)
+    // Feed fewer non-incrementing samples than the threshold (4800)
     let short_silence = vec![0.0f32; 2000];
     let result = analyzer.detect_frame_loss(&short_silence);
     assert!(
@@ -88,14 +90,13 @@ fn test_counter_recovery_no_false_loss() {
     assert_eq!(result.confirmed_lost, 0);
     assert!(!result.counter_silent);
 
-    // Phase 2: Mute — feed enough zeros to trigger silence
+    // Phase 2: Mute — feed enough stuck-zero samples to trigger silence
     let silence = vec![0.0f32; 5000];
     let result = analyzer.detect_frame_loss(&silence);
     assert!(result.counter_silent, "Should be in silence state");
 
     // Phase 3: Unmute — counter resumes at a completely different value
-    // (e.g., 5 seconds later at 96kHz = 480000 frames, counter wraps ~7 times)
-    let resume_start = 14000u32; // Arbitrary counter value after mute
+    let resume_start = 14000u32;
     let recovery: Vec<f32> = (0..200)
         .map(|i| ((resume_start + i) & 0xFFFF) as f32 / 65536.0)
         .collect();
@@ -108,13 +109,13 @@ fn test_counter_recovery_no_false_loss() {
     );
     assert!(
         !result.counter_silent,
-        "Should exit silence state after receiving non-zero values"
+        "Should exit silence state after receiving incrementing values"
     );
 }
 
 /// Test that the counter naturally wrapping through zero doesn't trigger
 /// false silence detection. The counter passes through zero once per 65536
-/// frames — that's a single zero-valued sample, far below the threshold.
+/// frames — that's a single stuck sample, far below the threshold.
 #[test]
 fn test_counter_wrap_through_zero_not_silence() {
     let sample_rate = 48000;
@@ -125,7 +126,6 @@ fn test_counter_wrap_through_zero_not_silence() {
     for i in 65530u32..65536 {
         samples.push(i as f32 / 65536.0);
     }
-    // Counter value 0 encodes as 0.0 — this single zero should NOT trigger silence
     for i in 0u32..10 {
         samples.push(i as f32 / 65536.0);
     }
@@ -187,7 +187,7 @@ fn test_multiple_silence_recovery_cycles() {
             cycle
         );
 
-        // Go silent
+        // Go silent (stuck zeros)
         let silence = vec![0.0f32; 5000];
         let result = analyzer.detect_frame_loss(&silence);
         assert!(
@@ -217,4 +217,148 @@ fn test_frame_loss_result_default() {
     assert_eq!(result.confirmed_lost, 0);
     assert!(!result.counter_silent);
     assert_eq!(result.samples_analyzed, 0);
+}
+
+// ===== NEW TESTS for non-incrementing counter detection =====
+
+/// Test silence detection with stuck non-zero counter value.
+/// VBMatrix mute may send residual noise that decodes to a constant value.
+#[test]
+fn test_counter_silence_stuck_nonzero_value() {
+    let sample_rate = 48000;
+    let mut analyzer = Analyzer::new(&[], sample_rate);
+
+    // Establish baseline with normal incrementing counter
+    let baseline: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
+    let result = analyzer.detect_frame_loss(&baseline);
+    assert!(!result.counter_silent);
+
+    // Stuck at counter value 42 (all samples decode to same value = diff 0)
+    let stuck_value = 42.0 / 65536.0;
+    let stuck_silence = vec![stuck_value; 5000];
+    let result = analyzer.detect_frame_loss(&stuck_silence);
+    assert!(
+        result.counter_silent,
+        "Should detect silence from stuck non-zero counter value"
+    );
+    assert_eq!(
+        result.confirmed_lost, 0,
+        "Stuck counter should not report loss"
+    );
+}
+
+/// Test silence detection with random low-level noise.
+/// VBMatrix mute may send small random values that decode to random counters
+/// (backward jumps, large forward jumps — never incrementing by 1).
+#[test]
+fn test_counter_silence_random_noise() {
+    let sample_rate = 48000;
+    let mut analyzer = Analyzer::new(&[], sample_rate);
+
+    // Establish baseline with normal incrementing counter
+    let baseline: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
+    let result = analyzer.detect_frame_loss(&baseline);
+    assert!(!result.counter_silent);
+
+    // Random noise: small float values that decode to random counter values.
+    // These will never increment by exactly 1, so non_incrementing_count grows.
+    // Use a deterministic pseudo-random pattern.
+    let noise: Vec<f32> = (0..5000)
+        .map(|i| {
+            // Simple pseudo-random noise: varies between 0.0001 and 0.01
+            ((i * 7 + 13) % 100) as f32 / 10000.0
+        })
+        .collect();
+    let result = analyzer.detect_frame_loss(&noise);
+    assert!(
+        result.counter_silent,
+        "Should detect silence from random noise (non-incrementing counters)"
+    );
+}
+
+/// Test silence detection with alternating values (simulating noise).
+/// Counter toggles between two values — never incrementing by 1.
+#[test]
+fn test_counter_silence_alternating_values() {
+    let sample_rate = 48000;
+    let mut analyzer = Analyzer::new(&[], sample_rate);
+
+    // Establish baseline
+    let baseline: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
+    let _ = analyzer.detect_frame_loss(&baseline);
+
+    // Alternating between counter 10 and 20 (diff is never 1)
+    let alternating: Vec<f32> = (0..5000)
+        .map(|i| {
+            if i % 2 == 0 {
+                10.0 / 65536.0
+            } else {
+                20.0 / 65536.0
+            }
+        })
+        .collect();
+    let result = analyzer.detect_frame_loss(&alternating);
+    assert!(
+        result.counter_silent,
+        "Should detect silence from alternating non-incrementing values"
+    );
+}
+
+/// Test that silence from noise recovers cleanly when real counter resumes.
+#[test]
+fn test_noise_silence_recovery_no_false_loss() {
+    let sample_rate = 48000;
+    let mut analyzer = Analyzer::new(&[], sample_rate);
+
+    // Phase 1: Normal operation (counter 0-99)
+    let normal: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
+    let result = analyzer.detect_frame_loss(&normal);
+    assert_eq!(result.confirmed_lost, 0);
+
+    // Phase 2: Noise silence (random small values, not incrementing)
+    let noise: Vec<f32> = (0..5000)
+        .map(|i| ((i * 7 + 13) % 100) as f32 / 10000.0)
+        .collect();
+    let result = analyzer.detect_frame_loss(&noise);
+    assert!(result.counter_silent, "Should be in noise silence state");
+
+    // Phase 3: Counter resumes at completely different position
+    let resume_start = 30000u32;
+    let recovery: Vec<f32> = (0..200)
+        .map(|i| ((resume_start + i) & 0xFFFF) as f32 / 65536.0)
+        .collect();
+    let result = analyzer.detect_frame_loss(&recovery);
+
+    assert_eq!(
+        result.confirmed_lost, 0,
+        "Recovery from noise silence should produce zero loss, got {}",
+        result.confirmed_lost
+    );
+    assert!(
+        !result.counter_silent,
+        "Should exit silence after incrementing counter resumes"
+    );
+}
+
+/// Test that a single non-incrementing sample during normal operation
+/// does NOT trigger silence (threshold is thousands of samples).
+#[test]
+fn test_single_glitch_not_silence() {
+    let sample_rate = 48000;
+    let mut analyzer = Analyzer::new(&[], sample_rate);
+
+    // Normal counter 0-49
+    let part1: Vec<f32> = (0..50).map(|i| i as f32 / 65536.0).collect();
+    let _ = analyzer.detect_frame_loss(&part1);
+
+    // One glitch (duplicate value = diff 0), then normal continues
+    let mut part2 = vec![49.0 / 65536.0]; // duplicate of last
+    for i in 50..100 {
+        part2.push(i as f32 / 65536.0);
+    }
+    let result = analyzer.detect_frame_loss(&part2);
+    assert!(
+        !result.counter_silent,
+        "Single glitch should not trigger silence"
+    );
 }

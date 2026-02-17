@@ -194,6 +194,28 @@ export async function restartAudioEngine(
 }
 
 /**
+ * Mute ONLY the counter channel (ch2 = VASIO8 channel 2) loopback.
+ * This mutes the ch1 counter signal while leaving ch0 (burst/latency) active.
+ */
+export async function muteCounterChannel(
+  host: string,
+  port?: number,
+): Promise<void> {
+  await muteRoutingPoint(host, "VASIO8", 2, "VASIO8", 2, port);
+}
+
+/**
+ * Unmute ONLY the counter channel (ch2 = VASIO8 channel 2) loopback.
+ * Restores the ch1 counter signal.
+ */
+export async function unmuteCounterChannel(
+  host: string,
+  port?: number,
+): Promise<void> {
+  await unmuteRoutingPoint(host, "VASIO8", 2, "VASIO8", 2, port);
+}
+
+/**
  * Check if VBAN-TEXT communication with VBMatrix is working.
  */
 export async function isVbanTextAvailable(host: string): Promise<boolean> {
