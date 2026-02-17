@@ -67,12 +67,14 @@ pub struct Analyzer {
     expected_frame: u64,
     /// Whether this analyzer has a valid MLS reference
     has_reference: bool,
-    /// Count of consecutive decoded-zero samples for silence detection
-    consecutive_zeros: usize,
-    /// Number of consecutive zero samples required to declare silence (sample_rate / 10 = 100ms)
+    /// Count of consecutive samples where counter is NOT incrementing by 1
+    non_incrementing_count: usize,
+    /// Number of non-incrementing samples required to declare silence (sample_rate / 10 = 100ms)
     silence_threshold: usize,
     /// Whether the previous call was in a silence state (used for recovery resync)
     was_silent: bool,
+    /// Last decoded counter value for increment detection
+    last_counter: Option<u32>,
 }
 
 impl Analyzer {
@@ -118,9 +120,10 @@ impl Analyzer {
             last_latency: None,
             expected_frame: 0,
             has_reference,
-            consecutive_zeros: 0,
+            non_incrementing_count: 0,
             silence_threshold: (sample_rate / 10) as usize,
             was_silent: false,
+            last_counter: None,
         }
     }
 
@@ -261,48 +264,58 @@ impl Analyzer {
             let normalized = sample.clamp(0.0, 1.0);
             let received_counter = (normalized * 65536.0) as u32 & 0xFFFF;
 
-            // Track consecutive zeros for silence detection
-            if received_counter == 0 {
-                self.consecutive_zeros += 1;
-            } else {
-                // Non-zero sample received
-                if self.was_silent {
-                    // Recovery from silence: resync expected_frame instead of
-                    // computing a gap. This prevents the massive false loss spike
-                    // that occurs when the counter resumes at a different value.
-                    self.was_silent = false;
-                    self.expected_frame = (received_counter as u64).wrapping_add(1);
-                    self.consecutive_zeros = 0;
-                    continue;
+            // Silence detection: check if counter is incrementing by exactly 1
+            if let Some(last) = self.last_counter {
+                let diff = if received_counter >= last {
+                    received_counter - last
+                } else {
+                    (65536 + received_counter as u64 - last as u64) as u32
+                };
+
+                if diff == 1 {
+                    // Normal increment: counter is alive
+                    self.non_incrementing_count = 0;
+
+                    if self.was_silent {
+                        // Recovery from silence: resync expected_frame to avoid
+                        // reporting a massive false loss spike from the gap.
+                        self.was_silent = false;
+                        self.expected_frame = (received_counter as u64).wrapping_add(1);
+                        self.last_counter = Some(received_counter);
+                        continue;
+                    }
+                } else {
+                    // Counter is NOT incrementing by 1:
+                    // diff == 0: stuck value (muted route, noise decoding same value)
+                    // diff >= 32768: backward jump (noise from muted route)
+                    // diff > 1 && diff < 32768: real gap OR start of silence
+                    self.non_incrementing_count += 1;
                 }
-                self.consecutive_zeros = 0;
             }
 
-            // Normal gap detection (only when not in silence)
+            // Gap detection (only when not in silence state)
             if !self.was_silent && self.expected_frame > 0 {
                 let expected = (self.expected_frame & 0xFFFF) as u32;
-
-                // Calculate difference accounting for wrap-around
                 let diff = if received_counter >= expected {
                     received_counter - expected
                 } else {
                     (65536 + received_counter as u64 - expected as u64) as u32
                 };
-
-                // If diff > 1 and < 32768 (half range), we have a gap
                 if diff > 1 && diff < 32768 {
                     total_lost += (diff - 1) as usize;
                 }
             }
 
-            // Update expected frame (skip when entering silence to freeze tracking)
-            if self.consecutive_zeros < self.silence_threshold {
+            // Update expected frame (freeze when entering silence)
+            if self.non_incrementing_count < self.silence_threshold {
                 self.expected_frame = (received_counter as u64).wrapping_add(1);
             }
+
+            self.last_counter = Some(received_counter);
         }
 
         // Determine silence state
-        let counter_silent = self.consecutive_zeros >= self.silence_threshold;
+        let counter_silent = self.non_incrementing_count >= self.silence_threshold;
         if counter_silent {
             self.was_silent = true;
         }
@@ -328,8 +341,9 @@ impl Analyzer {
     pub fn reset(&mut self) {
         self.last_latency = None;
         self.expected_frame = 0;
-        self.consecutive_zeros = 0;
+        self.non_incrementing_count = 0;
         self.was_silent = false;
+        self.last_counter = None;
     }
 }
 
