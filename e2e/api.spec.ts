@@ -29,6 +29,11 @@ test.describe("REST API", () => {
     expect(body).toHaveProperty("loss_history");
     expect(Array.isArray(body.latency_history)).toBe(true);
     expect(Array.isArray(body.loss_history)).toBe(true);
+    // Counter silence fields
+    expect(body).toHaveProperty("estimated_loss");
+    expect(body).toHaveProperty("counter_silent");
+    expect(typeof body.estimated_loss).toBe("number");
+    expect(typeof body.counter_silent).toBe("boolean");
   });
 
   test("GET /api/v1/devices returns device array", async ({ request }) => {

@@ -367,8 +367,11 @@ fn frame_loss_detection_accuracy() {
 
     // Perfect sequence - no loss
     let perfect: Vec<f32> = (0..1000).map(|i| i as f32 / 65536.0).collect();
-    let loss = analyzer.detect_frame_loss(&perfect);
-    assert_eq!(loss, 0, "Perfect sequence should have no loss");
+    let result = analyzer.detect_frame_loss(&perfect);
+    assert_eq!(
+        result.confirmed_lost, 0,
+        "Perfect sequence should have no loss"
+    );
 
     analyzer.reset();
 
@@ -383,14 +386,14 @@ fn frame_loss_detection_accuracy() {
     let mut with_gap: Vec<f32> = (0..500).map(|i| i as f32 / 65536.0).collect();
     with_gap.extend((510..1000).map(|i| i as f32 / 65536.0));
 
-    let loss = analyzer.detect_frame_loss(&with_gap);
+    let result = analyzer.detect_frame_loss(&with_gap);
     // Expected: 499 -> 510 means diff = 11 (from 499 to 510), loss = diff - 1 = 10
     // But 500 is expected after 499, and 510 is received, so diff = 510 - 500 = 10
     // Loss = 10 - 1 = 9 (the algorithm subtracts 1 because diff=1 means no loss)
     assert!(
-        (9..=10).contains(&loss),
+        (9..=10).contains(&result.confirmed_lost),
         "Should detect approximately 10 lost frames, got {}",
-        loss
+        result.confirmed_lost
     );
 }
 
