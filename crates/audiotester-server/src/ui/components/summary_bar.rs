@@ -30,7 +30,6 @@ pub fn SummaryBar() -> impl IntoView {
             <div class="metric">
                 <span class="metric-label">"Lost"</span>
                 <span class="metric-value" data-testid="lost-value">"0"</span>
-                <span class="metric-estimated" data-testid="estimated-loss" style="display:none"></span>
             </div>
             <div class="metric">
                 <span class="metric-label">"Corrupted"</span>
