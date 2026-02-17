@@ -262,6 +262,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut last_device_name: Option<String> = None;
     let mut device_info_update_counter: u32 = 0;
     let mut last_successful_analysis: Option<std::time::Instant> = None;
+    let mut loss_archive_tick_counter: u32 = 0;
     let mut signal_lost = false;
     let mut signal_lost_since: Option<std::time::Instant> = None;
     let mut reconnect_start: Option<std::time::Instant> = None;
@@ -323,6 +324,15 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     store.set_samples_sent(sent as u64);
                     store.set_samples_received(received as u64);
                 }
+            }
+        }
+
+        // Tick loss archive every 10 seconds (100 cycles * 100ms = 10s)
+        loss_archive_tick_counter += 1;
+        if loss_archive_tick_counter >= 100 {
+            loss_archive_tick_counter = 0;
+            if let Ok(mut store) = stats.lock() {
+                store.loss_archive_tick();
             }
         }
 

@@ -9,7 +9,7 @@
 //! - PWA-ready meta tags
 
 use super::components::summary_bar::SummaryBar;
-use super::{DASHBOARD_SCRIPT, DASHBOARD_STYLES};
+use super::{DASHBOARD_SCRIPT, DASHBOARD_STYLES, LIGHTWEIGHT_CHARTS_SCRIPT};
 use crate::AppState;
 use axum::extract::State;
 use axum::response::Html;
@@ -84,11 +84,20 @@ fn DashboardPage() -> impl IntoView {
                             <div id="latency-chart" class="chart"></div>
                         </div>
                         <div class="chart-container">
-                            <h2>"Sample Loss Events"</h2>
-                            <div id="loss-chart" class="chart"></div>
+                            <div class="chart-header">
+                                <h2>"Sample Loss Timeline"</h2>
+                                <div class="zoom-controls" id="loss-zoom-controls">
+                                    <button class="zoom-btn" data-range="1h">"1h"</button>
+                                    <button class="zoom-btn" data-range="6h">"6h"</button>
+                                    <button class="zoom-btn" data-range="12h">"12h"</button>
+                                    <button class="zoom-btn active" data-range="24h">"24h"</button>
+                                </div>
+                            </div>
+                            <div id="loss-timeline" class="chart" data-testid="loss-timeline"></div>
                         </div>
                     </section>
                 </main>
+                <script>{LIGHTWEIGHT_CHARTS_SCRIPT}</script>
                 <script>{DASHBOARD_SCRIPT}</script>
             </body>
         </html>

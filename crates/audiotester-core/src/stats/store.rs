@@ -11,6 +11,12 @@ const MAX_HISTORY_SIZE: usize = 3600; // 1 hour at 1 sample/sec
 /// Maximum number of data points in archive (down-sampled)
 const MAX_ARCHIVE_SIZE: usize = 8640; // 24 hours at 10-second intervals
 
+/// Duration of each loss archive bucket in seconds
+const LOSS_BUCKET_DURATION_SECS: i64 = 10;
+
+/// Maximum number of loss archive buckets (24h at 10s = 8640)
+const MAX_LOSS_ARCHIVE_SIZE: usize = 8640;
+
 /// A single measurement point
 #[derive(Debug, Clone)]
 pub struct Measurement {
@@ -40,6 +46,17 @@ pub struct LossEvent {
     pub count: u64,
 }
 
+/// Aggregated loss over a fixed time window (10 seconds)
+#[derive(Debug, Clone)]
+pub struct LossBucket {
+    /// Start of this bucket (truncated to LOSS_BUCKET_DURATION_SECS boundary)
+    pub timestamp: DateTime<Utc>,
+    /// Total samples lost in this bucket
+    pub total_loss: u64,
+    /// Number of discrete loss events in this bucket
+    pub event_count: u32,
+}
+
 /// Statistics store for time-series data
 #[derive(Debug)]
 pub struct StatsStore {
@@ -55,6 +72,8 @@ pub struct StatsStore {
     disconnection_events: Vec<DisconnectionEvent>,
     /// Loss events with timestamps
     loss_events: Vec<LossEvent>,
+    /// Loss archive: 10-second buckets for 24h timeline
+    loss_archive: VecDeque<LossBucket>,
     /// Maximum history size
     max_size: usize,
     /// Maximum archive size
@@ -114,6 +133,7 @@ impl StatsStore {
             corruption_history: VecDeque::with_capacity(MAX_HISTORY_SIZE),
             disconnection_events: Vec::new(),
             loss_events: Vec::new(),
+            loss_archive: VecDeque::with_capacity(MAX_LOSS_ARCHIVE_SIZE),
             max_size: MAX_HISTORY_SIZE,
             max_archive_size: MAX_ARCHIVE_SIZE,
             stats: RunningStats {
@@ -182,6 +202,33 @@ impl StatsStore {
             count,
         });
 
+        // Aggregate into loss_archive bucket
+        let bucket_ts = Self::truncate_to_bucket(now);
+        if let Some(last) = self.loss_archive.back_mut() {
+            if last.timestamp == bucket_ts {
+                // Same bucket — aggregate
+                last.total_loss += count;
+                last.event_count += 1;
+            } else {
+                // New bucket
+                if self.loss_archive.len() >= MAX_LOSS_ARCHIVE_SIZE {
+                    self.loss_archive.pop_front();
+                }
+                self.loss_archive.push_back(LossBucket {
+                    timestamp: bucket_ts,
+                    total_loss: count,
+                    event_count: 1,
+                });
+            }
+        } else {
+            // First bucket ever
+            self.loss_archive.push_back(LossBucket {
+                timestamp: bucket_ts,
+                total_loss: count,
+                event_count: 1,
+            });
+        }
+
         self.stats.total_lost += count;
     }
 
@@ -231,6 +278,7 @@ impl StatsStore {
         self.corruption_history.clear();
         self.disconnection_events.clear();
         self.loss_events.clear();
+        self.loss_archive.clear();
         self.archive_counter = 0;
         self.stats = RunningStats {
             min_latency: f64::MAX,
@@ -288,6 +336,87 @@ impl StatsStore {
         self.stats.samples_received = 0;
         self.stats.estimated_loss = 0;
         self.stats.counter_silent = false;
+    }
+
+    /// Truncate a timestamp to the nearest LOSS_BUCKET_DURATION_SECS boundary
+    fn truncate_to_bucket(ts: DateTime<Utc>) -> DateTime<Utc> {
+        let secs = ts.timestamp();
+        let truncated = secs - (secs % LOSS_BUCKET_DURATION_SECS);
+        DateTime::from_timestamp(truncated, 0).unwrap_or(ts)
+    }
+
+    /// Called every 10 seconds from the monitoring loop.
+    ///
+    /// Ensures continuous timeline coverage by appending a zero-loss bucket
+    /// when the most recent bucket is older than LOSS_BUCKET_DURATION_SECS.
+    /// This lets the chart display the full monitored timespan with empty gaps.
+    pub fn loss_archive_tick(&mut self) {
+        let now = Utc::now();
+        let bucket_ts = Self::truncate_to_bucket(now);
+
+        let should_push = match self.loss_archive.back() {
+            Some(last) => last.timestamp < bucket_ts,
+            None => false, // Don't push zero buckets if archive is empty (no monitoring data)
+        };
+
+        if should_push {
+            if self.loss_archive.len() >= MAX_LOSS_ARCHIVE_SIZE {
+                self.loss_archive.pop_front();
+            }
+            self.loss_archive.push_back(LossBucket {
+                timestamp: bucket_ts,
+                total_loss: 0,
+                event_count: 0,
+            });
+        }
+    }
+
+    /// Query loss timeline data for a given time range, re-aggregated into larger buckets.
+    ///
+    /// # Arguments
+    /// * `range_secs` - How far back to look (e.g. 3600 for 1h, 86400 for 24h)
+    /// * `bucket_size_secs` - Desired output bucket size in seconds (must be >= 10)
+    ///
+    /// # Returns
+    /// Vector of (unix_timestamp, total_loss, event_count) tuples, sorted by time
+    pub fn loss_timeline_data(
+        &self,
+        range_secs: i64,
+        bucket_size_secs: i64,
+    ) -> Vec<(i64, u64, u32)> {
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::seconds(range_secs);
+        let bucket_size = bucket_size_secs.max(LOSS_BUCKET_DURATION_SECS);
+
+        // Filter to range
+        let in_range: Vec<&LossBucket> = self
+            .loss_archive
+            .iter()
+            .filter(|b| b.timestamp >= cutoff)
+            .collect();
+
+        if in_range.is_empty() {
+            return Vec::new();
+        }
+
+        // Re-aggregate into requested bucket size
+        let mut result: Vec<(i64, u64, u32)> = Vec::new();
+
+        for bucket in in_range {
+            let ts = bucket.timestamp.timestamp();
+            let aligned_ts = ts - (ts % bucket_size);
+
+            if let Some(last) = result.last_mut() {
+                if last.0 == aligned_ts {
+                    last.1 += bucket.total_loss;
+                    last.2 += bucket.event_count;
+                    continue;
+                }
+            }
+            result.push((aligned_ts, bucket.total_loss, bucket.event_count));
+        }
+
+        result
     }
 
     /// Record a disconnection event

@@ -18,6 +18,10 @@ pub const DASHBOARD_SCRIPT: &str = include_str!("scripts/dashboard.js");
 /// JavaScript for settings page interactivity
 pub const SETTINGS_SCRIPT: &str = include_str!("scripts/settings.js");
 
+/// TradingView Lightweight Charts v5.1 standalone production build
+pub const LIGHTWEIGHT_CHARTS_SCRIPT: &str =
+    include_str!("scripts/lightweight-charts.standalone.production.js");
+
 /// PWA manifest JSON
 pub const MANIFEST_JSON: &str = include_str!("manifest.json");
 

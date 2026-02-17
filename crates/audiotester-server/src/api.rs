@@ -398,6 +398,76 @@ pub async fn toggle_monitoring(
     }))
 }
 
+/// Query parameters for GET /api/v1/loss-timeline
+#[derive(Deserialize)]
+pub struct LossTimelineQuery {
+    /// Time range: "1h", "6h", "12h", "24h" (default: "24h")
+    pub range: Option<String>,
+    /// Bucket size in seconds (default: auto based on range)
+    pub bucket_size: Option<i64>,
+}
+
+/// A single bucket in the loss timeline response
+#[derive(Serialize)]
+pub struct LossTimelineBucket {
+    /// Unix timestamp (start of bucket)
+    pub t: i64,
+    /// Total samples lost in this bucket
+    pub loss: u64,
+    /// Number of discrete loss events
+    pub events: u32,
+}
+
+/// Loss timeline response
+#[derive(Serialize)]
+pub struct LossTimelineResponse {
+    /// Bucket size in seconds
+    pub bucket_size_secs: i64,
+    /// Bucketed loss data
+    pub buckets: Vec<LossTimelineBucket>,
+}
+
+/// GET /api/v1/loss-timeline
+///
+/// Returns bucketed loss data for the timeline chart.
+/// Supports range parameter for zoom levels and auto bucket sizing.
+pub async fn get_loss_timeline(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<LossTimelineQuery>,
+) -> Json<LossTimelineResponse> {
+    let range_str = query.range.as_deref().unwrap_or("24h");
+
+    let range_secs: i64 = match range_str {
+        "1h" => 3600,
+        "6h" => 21600,
+        "12h" => 43200,
+        _ => 86400, // default 24h
+    };
+
+    // Auto bucket sizing based on range (target ~300-360 buckets)
+    let bucket_size = query.bucket_size.unwrap_or(match range_str {
+        "1h" => 10,
+        "6h" => 60,
+        "12h" => 120,
+        _ => 300,
+    });
+
+    let buckets = {
+        let store = state.stats.lock().unwrap();
+        store.loss_timeline_data(range_secs, bucket_size)
+    };
+
+    let response_buckets: Vec<LossTimelineBucket> = buckets
+        .into_iter()
+        .map(|(t, loss, events)| LossTimelineBucket { t, loss, events })
+        .collect();
+
+    Json(LossTimelineResponse {
+        bucket_size_secs: bucket_size,
+        buckets: response_buckets,
+    })
+}
+
 /// Query parameters for GET /api/v1/logs
 #[derive(Deserialize)]
 pub struct LogsQuery {

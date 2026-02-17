@@ -244,6 +244,44 @@ main {
   flex-shrink: 0;
 }
 
+.chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 0.5rem;
+  flex-shrink: 0;
+}
+
+.chart-header h2 {
+  margin-bottom: 0;
+}
+
+.zoom-controls {
+  display: flex;
+  gap: 0.25rem;
+}
+
+.zoom-btn {
+  padding: 0.2rem 0.5rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: #8892b0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  transition: background 0.2s;
+}
+
+.zoom-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.zoom-btn.active {
+  background: rgba(0, 212, 255, 0.15);
+  color: #00d4ff;
+  border-color: rgba(0, 212, 255, 0.3);
+}
+
 .chart {
   width: 100%;
   flex: 1;
