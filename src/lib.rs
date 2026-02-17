@@ -20,7 +20,7 @@ pub use audiotester_core::{BurstDetector, BurstEvent, BurstGenerator};
 pub use audiotester_core::{LatencyAnalyzer, LatencyResult};
 
 // Frame-based loss detection
-pub use audiotester_core::Analyzer;
+pub use audiotester_core::{Analyzer, FrameLossResult};
 
 // Legacy MLS exports (for backward compatibility)
 pub use audiotester_core::MlsGenerator;

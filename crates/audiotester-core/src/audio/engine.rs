@@ -116,6 +116,8 @@ pub struct AnalysisResult {
     pub corrupted_samples: usize,
     /// Whether the signal is healthy
     pub is_healthy: bool,
+    /// True when ch1 counter signal is absent (muted loopback)
+    pub counter_silent: bool,
 }
 
 impl From<LatencyResult> for AnalysisResult {
@@ -127,6 +129,7 @@ impl From<LatencyResult> for AnalysisResult {
             lost_samples: 0,
             corrupted_samples: 0,
             is_healthy: lr.confidence > 0.5,
+            counter_silent: false,
         }
     }
 }
@@ -765,9 +768,10 @@ impl AudioEngine {
             let counter_samples = &self.counter_buffer[..counter_read];
 
             if let Ok(mut frame_analyzer) = shared_state.frame_analyzer.lock() {
-                let frame_loss = frame_analyzer.detect_frame_loss(counter_samples);
-                result.lost_samples = frame_loss;
-                if frame_loss > 0 {
+                let frame_result = frame_analyzer.detect_frame_loss(counter_samples);
+                result.lost_samples = frame_result.confirmed_lost;
+                result.counter_silent = frame_result.counter_silent;
+                if frame_result.confirmed_lost > 0 {
                     result.is_healthy = false;
                 }
             }

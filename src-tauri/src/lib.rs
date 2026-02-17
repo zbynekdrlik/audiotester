@@ -247,27 +247,6 @@ fn calculate_backoff_ms(attempt: u32) -> u64 {
 /// Maximum number of reconnection attempts before requiring manual intervention
 const MAX_RECONNECT_ATTEMPTS: u32 = 5;
 
-/// Lost samples threshold for detecting virtual ASIO driver restarts (issue #26).
-/// When VBMatrix restarts its audio engine, VASIO-8 does NOT send
-/// kAsioResetRequest. Instead, ~14000-17000 samples are lost in one cycle.
-/// Detection triggers a full engine restart: stop ASIO → wait for VBMatrix
-/// to settle → reconnect fresh. A fresh ASIO connection to a settled
-/// VBMatrix always produces consistent buffer phase alignment.
-const ASIO_RESTART_LOST_THRESHOLD: usize = 5000;
-
-/// Delay after stopping ASIO before reconnecting (issue #26).
-/// VBMatrix does a multi-stage restart: the first stage takes ~2-3s, but a
-/// second phase realignment can occur ~10s later.  15s covers both stages.
-/// A fresh ASIO connection to a fully-settled VBMatrix always gives a
-/// deterministic buffer phase (proven by manual tests on iem.lan).
-const ASIO_RESTART_SETTLE_MS: u64 = 15000;
-
-/// Cooldown after ASIO restart recovery (issue #26).
-/// After a successful reconnection, ignore subsequent lost_samples spikes
-/// for this duration.  Prevents cascading restarts when VBMatrix or the
-/// ASIO driver are still settling.
-const ASIO_RESTART_COOLDOWN_SECS: u64 = 30;
-
 /// Main monitoring loop - analyzes audio and broadcasts stats
 ///
 /// Includes auto-reconnection with exponential backoff. When the audio engine
@@ -286,9 +265,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     let mut signal_lost = false;
     let mut signal_lost_since: Option<std::time::Instant> = None;
     let mut reconnect_start: Option<std::time::Instant> = None;
-    // ASIO restart recovery state (issue #26).
-    let mut valid_measurement_seen = false;
-    let mut asio_restart_cooldown_until: Option<std::time::Instant> = None;
+    // Counter silence tracking: ch1 muted loopback estimated loss.
+    let mut counter_silent_since: Option<std::time::Instant> = None;
+    let mut cached_sample_rate: u32 = audiotester_core::DEFAULT_SAMPLE_RATE;
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
     if APP_HANDLE.get().is_none() {
@@ -318,6 +297,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         engine_status.sample_rate,
                         0, // Buffer size not exposed by cpal yet
                     );
+                }
+
+                // Cache sample rate for counter silence estimation
+                if engine_status.sample_rate > 0 {
+                    cached_sample_rate = engine_status.sample_rate;
                 }
 
                 // Track if device changed (for reconnection)
@@ -369,8 +353,14 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     last_successful_analysis = None;
                     signal_lost = false;
                     signal_lost_since = None;
+                    counter_silent_since = None;
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(false);
+                        let estimated = store.stats().estimated_loss;
+                        if estimated > 0 {
+                            store.record_loss(estimated);
+                        }
+                        store.reset_estimated_loss();
                     }
                 }
                 Err(e) => {
@@ -383,72 +373,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // Try to analyze
         match engine.analyze().await {
             Ok(Some(result)) => {
-                // Detect virtual ASIO driver restart via lost samples (issue #26).
-                // VASIO-8 doesn't send kAsioResetRequest, but VBMatrix restart
-                // causes ~14000-17000 lost samples in a single cycle.
-                // Skip on initial startup (first few cycles often show lost
-                // samples before the analyzer has established a baseline).
-                // Also skip during cooldown after a recent recovery.
-                let in_cooldown = asio_restart_cooldown_until
-                    .map(|t| t > std::time::Instant::now())
-                    .unwrap_or(false);
-                if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD
-                    && valid_measurement_seen
-                    && !in_cooldown
-                {
-                    tracing::warn!(
-                        lost_samples = result.lost_samples,
-                        latency_ms = %format!("{:.3}", result.latency_ms),
-                        "ASIO driver restart detected (lost samples), reconnecting"
-                    );
-
-                    // Step 1: Release ASIO driver immediately
-                    if let Err(e) = engine.stop().await {
-                        tracing::debug!(error = %e, "Stop during ASIO restart recovery");
-                    }
-
-                    // Step 2: Wait for VBMatrix to fully settle.
-                    // VBMatrix does a multi-stage restart (~10s total).
-                    // Reconnecting before it's fully settled gives an unstable
-                    // buffer phase that can shift mid-stream.
-                    tracing::info!(
-                        settle_ms = ASIO_RESTART_SETTLE_MS,
-                        "Waiting for ASIO driver to settle before reconnecting"
-                    );
-                    tokio::time::sleep(Duration::from_millis(ASIO_RESTART_SETTLE_MS)).await;
-
-                    // Step 3: Fresh ASIO connection to fully-settled VBMatrix.
-                    // The latency may shift by ±1 ASIO buffer (±128 samples =
-                    // ±1.33ms at 96kHz) compared to before the restart.  This
-                    // is expected ASIO behavior and the measurement is stable.
-                    if let Some(ref device) = last_device_name {
-                        if let Err(e) = engine.select_device(device.clone()).await {
-                            tracing::warn!(error = %e, "Failed to re-select device after ASIO restart");
-                        }
-                    }
-
-                    match engine.start().await {
-                        Ok(()) => {
-                            tracing::info!("Engine reconnected after ASIO driver restart");
-                            last_successful_analysis = None;
-                            signal_lost = false;
-                            signal_lost_since = None;
-                            if let Ok(mut store) = stats.lock() {
-                                store.set_signal_lost(false);
-                            }
-                            // Start cooldown to prevent cascading restarts.
-                            asio_restart_cooldown_until = Some(
-                                std::time::Instant::now()
-                                    + Duration::from_secs(ASIO_RESTART_COOLDOWN_SECS),
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!(error = %e, "Failed to reconnect after ASIO driver restart");
-                        }
-                    }
-                    continue;
-                }
-
                 // Check if signal is valid:
                 // 1. Latency must be in valid range (1-100ms for loopback)
                 //    - >100ms indicates MLS period aliasing (no real correlation peak)
@@ -458,10 +382,6 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 let has_valid_signal = latency_valid && confidence_valid;
 
                 if has_valid_signal {
-                    // Mark that we've seen a valid measurement (skip false
-                    // positives on initial startup).
-                    valid_measurement_seen = true;
-
                     // Update last successful analysis time only for valid signals
                     last_successful_analysis = Some(std::time::Instant::now());
 
@@ -532,6 +452,40 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     }
                     if result.corrupted_samples > 0 {
                         store.record_corruption(result.corrupted_samples as u64);
+                    }
+                }
+
+                // Track counter silence state for estimated loss calculation
+                if result.counter_silent {
+                    if counter_silent_since.is_none() {
+                        counter_silent_since = Some(std::time::Instant::now());
+                        tracing::warn!("Counter signal absent (ch1 muted)");
+                    }
+                    // Compute estimated missing samples from elapsed time
+                    if let Some(since) = counter_silent_since {
+                        let elapsed_secs = since.elapsed().as_secs_f64();
+                        let estimated = (elapsed_secs * cached_sample_rate as f64) as u64;
+                        if let Ok(mut store) = stats.lock() {
+                            store.set_counter_silent(true);
+                            store.set_estimated_loss(estimated);
+                        }
+                    }
+                } else if counter_silent_since.is_some() {
+                    // Recovery from silence: commit estimated loss to total_lost
+                    // before resetting, so the mute-period samples are not discarded.
+                    counter_silent_since = None;
+                    if let Ok(mut store) = stats.lock() {
+                        let estimated = store.stats().estimated_loss;
+                        if estimated > 0 {
+                            tracing::info!(
+                                estimated_loss = estimated,
+                                "Counter signal recovered — committing estimated loss to total"
+                            );
+                            store.record_loss(estimated);
+                        } else {
+                            tracing::info!("Counter signal recovered (ch1 unmuted)");
+                        }
+                        store.reset_estimated_loss();
                     }
                 }
 
@@ -684,6 +638,14 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                             tracing::info!("Engine restarted after signal loss");
                             last_successful_analysis = None;
                             signal_lost_since = Some(std::time::Instant::now());
+                            counter_silent_since = None;
+                            if let Ok(mut store) = stats.lock() {
+                                let estimated = store.stats().estimated_loss;
+                                if estimated > 0 {
+                                    store.record_loss(estimated);
+                                }
+                                store.reset_estimated_loss();
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to restart after signal loss");

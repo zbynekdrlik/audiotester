@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "git fetch origin main dev 2>/dev/null && echo \"Fetched origin/main and origin/dev\" && if ! git merge-base --is-ancestor origin/main HEAD; then echo \"WARNING: Current branch is BEHIND origin/main! Run: git rebase origin/main\"; else echo \"Branch is up to date with origin/main\"; fi",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

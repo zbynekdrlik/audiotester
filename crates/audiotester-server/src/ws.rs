@@ -55,6 +55,8 @@ fn build_stats_json(state: &AppState) -> Option<String> {
         samples_received: stats.samples_received,
         signal_lost: stats.signal_lost,
         confidence: stats.last_confidence,
+        estimated_loss: stats.estimated_loss,
+        counter_silent: stats.counter_silent,
     };
     serde_json::to_string(&response).ok()
 }

@@ -98,6 +98,10 @@ pub struct RunningStats {
     pub signal_lost: bool,
     /// Last correlation confidence (0.0 to 1.0)
     pub last_confidence: f32,
+    /// Estimated missing samples while counter signal was absent
+    pub estimated_loss: u64,
+    /// True when ch1 counter signal is currently absent (muted loopback)
+    pub counter_silent: bool,
 }
 
 impl StatsStore {
@@ -282,6 +286,8 @@ impl StatsStore {
         self.stats.uptime_seconds = 0;
         self.stats.samples_sent = 0;
         self.stats.samples_received = 0;
+        self.stats.estimated_loss = 0;
+        self.stats.counter_silent = false;
     }
 
     /// Record a disconnection event
@@ -415,6 +421,22 @@ impl StatsStore {
     /// Get last confidence value
     pub fn confidence(&self) -> f32 {
         self.stats.last_confidence
+    }
+
+    /// Set counter silent state
+    pub fn set_counter_silent(&mut self, silent: bool) {
+        self.stats.counter_silent = silent;
+    }
+
+    /// Set estimated loss during counter silence
+    pub fn set_estimated_loss(&mut self, estimated: u64) {
+        self.stats.estimated_loss = estimated;
+    }
+
+    /// Reset estimated loss (called on recovery from silence or engine restart)
+    pub fn reset_estimated_loss(&mut self) {
+        self.stats.estimated_loss = 0;
+        self.stats.counter_silent = false;
     }
 }
 
