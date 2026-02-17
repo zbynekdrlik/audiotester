@@ -194,6 +194,77 @@ export async function restartAudioEngine(
 }
 
 /**
+ * Remove a routing point entirely from VBMatrix.
+ * This is different from mute — the routing point ceases to exist.
+ * After removal, the channel sends silence (no signal at all).
+ *
+ * WARNING: .Remove may behave differently than .Mute. Use for testing
+ * routing point removal scenarios only.
+ */
+export async function removeRoutingPoint(
+  host: string,
+  slotIn: string,
+  channelIn: number,
+  slotOut: string,
+  channelOut: number,
+  port?: number,
+): Promise<void> {
+  await sendCommand(
+    host,
+    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).Remove = 1;`,
+    { port },
+  );
+}
+
+/**
+ * Create a routing point in VBMatrix.
+ * Used to restore a previously removed routing point.
+ */
+export async function createRoutingPoint(
+  host: string,
+  slotIn: string,
+  channelIn: number,
+  slotOut: string,
+  channelOut: number,
+  port?: number,
+): Promise<void> {
+  // Setting dBGain creates the point if it doesn't exist
+  await sendCommand(
+    host,
+    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).dBGain = 0.0;`,
+    { port },
+  );
+  // Ensure it's unmuted
+  await sendCommand(
+    host,
+    `Point(${slotIn}.IN[${channelIn}],${slotOut}.OUT[${channelOut}]).Mute = 0;`,
+    { port },
+  );
+}
+
+/**
+ * Remove ONLY the counter channel (ch2) routing point entirely.
+ * This removes the routing point from VBMatrix, not just muting it.
+ */
+export async function removeCounterChannel(
+  host: string,
+  port?: number,
+): Promise<void> {
+  await removeRoutingPoint(host, "VASIO8", 2, "VASIO8", 2, port);
+}
+
+/**
+ * Recreate the counter channel (ch2) routing point.
+ * Restores the routing point after removal.
+ */
+export async function recreateCounterChannel(
+  host: string,
+  port?: number,
+): Promise<void> {
+  await createRoutingPoint(host, "VASIO8", 2, "VASIO8", 2, port);
+}
+
+/**
  * Mute ONLY the counter channel (ch2 = VASIO8 channel 2) loopback.
  * This mutes the ch1 counter signal while leaving ch0 (burst/latency) active.
  */

@@ -4,6 +4,8 @@ import {
   muteCounterChannel,
   unmuteCounterChannel,
   reconnectVasio8Loopback,
+  removeCounterChannel,
+  recreateCounterChannel,
 } from "./helpers/vban-text";
 
 // These tests only run when AUDIOTESTER_HARDWARE_TEST=true
@@ -128,7 +130,9 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     expect(est2).toBeGreaterThan(0);
   });
 
-  test("5: clean recovery when ch2 unmuted", async ({ request }) => {
+  test("5: estimated_loss rolls into total_lost on unmute", async ({
+    request,
+  }) => {
     // Mute counter channel and wait for silence detection
     await muteCounterChannel(vbmatrixHost);
 
@@ -144,10 +148,15 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     }
     expect(silenceDetected).toBe(true);
 
-    // Record total_lost before unmute
+    // Wait 3s for estimated_loss to accumulate meaningfully
+    await new Promise((r) => setTimeout(r, 3000));
+
+    // Record total_lost and estimated_loss just before unmute
     const beforeUnmute = await request.get("/api/v1/stats");
     const beforeStats = await beforeUnmute.json();
     const lostBefore = beforeStats.total_lost;
+    const estimatedBefore = beforeStats.estimated_loss;
+    expect(estimatedBefore).toBeGreaterThan(0);
 
     // Unmute counter channel
     await unmuteCounterChannel(vbmatrixHost);
@@ -160,9 +169,10 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
       const stats = await resp.json();
       if (!stats.counter_silent && stats.estimated_loss === 0) {
         recovered = true;
-        // Verify no massive loss spike from the gap
-        // Allow small tolerance (a few samples may be lost during transition)
-        expect(stats.total_lost - lostBefore).toBeLessThan(100);
+        // estimated_loss should have been added to total_lost
+        // Allow 20% tolerance for timing differences
+        const increase = stats.total_lost - lostBefore;
+        expect(increase).toBeGreaterThanOrEqual(estimatedBefore * 0.8);
         break;
       }
     }
@@ -311,7 +321,14 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
     await expect(lostEl).toHaveClass(/warning/, { timeout: 5000 });
   });
 
-  test("10: 3 mute/unmute cycles stable", async ({ request }) => {
+  test("10: 3 mute/unmute cycles accumulate total_lost", async ({
+    request,
+  }) => {
+    // Record baseline total_lost
+    const baseResp = await request.get("/api/v1/stats");
+    const baseStats = await baseResp.json();
+    let cumulativeLost = baseStats.total_lost;
+
     for (let cycle = 0; cycle < 3; cycle++) {
       // Mute counter channel
       await muteCounterChannel(vbmatrixHost);
@@ -329,10 +346,15 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
       }
       expect(silenceDetected).toBe(true);
 
-      // Record total_lost before unmute
+      // Let estimated_loss accumulate for 2s
+      await new Promise((r) => setTimeout(r, 2000));
+
+      // Record state before unmute
       const beforeResp = await request.get("/api/v1/stats");
       const beforeStats = await beforeResp.json();
       const lostBefore = beforeStats.total_lost;
+      const estimatedBefore = beforeStats.estimated_loss;
+      expect(estimatedBefore).toBeGreaterThan(0);
 
       // Unmute counter channel
       await unmuteCounterChannel(vbmatrixHost);
@@ -343,10 +365,12 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
         await new Promise((r) => setTimeout(r, 500));
         const resp = await request.get("/api/v1/stats");
         const stats = await resp.json();
-        if (!stats.counter_silent) {
+        if (!stats.counter_silent && stats.estimated_loss === 0) {
           recovered = true;
-          // No massive loss spike
-          expect(stats.total_lost - lostBefore).toBeLessThan(100);
+          // Estimated loss should roll into total_lost
+          const increase = stats.total_lost - lostBefore;
+          expect(increase).toBeGreaterThanOrEqual(estimatedBefore * 0.8);
+          cumulativeLost = stats.total_lost;
           break;
         }
       }
@@ -355,5 +379,54 @@ test.describe("Counter Silence Detection (CH1 Mute)", () => {
       // Brief stabilization between cycles
       await new Promise((r) => setTimeout(r, 2000));
     }
+
+    // After 3 cycles, total_lost should be significantly higher than baseline
+    expect(cumulativeLost).toBeGreaterThan(baseStats.total_lost);
+  });
+
+  test("11: routing point removal does NOT trigger engine restart", async ({
+    request,
+  }) => {
+    // Get baseline: ch0 latency should be valid
+    const baseResp = await request.get("/api/v1/stats");
+    const baseStats = await baseResp.json();
+    expect(baseStats.current_latency).toBeGreaterThan(0);
+    expect(baseStats.current_latency).toBeLessThan(50);
+    expect(baseStats.signal_lost).toBe(false);
+
+    // Remove the counter channel routing point entirely (not just mute)
+    await removeCounterChannel(vbmatrixHost);
+
+    // Monitor for 15s: ch0 latency should remain stable throughout.
+    // If the old lost_samples ASIO restart fires, latency will drop to 0
+    // and signal_lost will become true (engine stops for 15s settle time).
+    let restartDetected = false;
+    const latencies: number[] = [];
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      const resp = await request.get("/api/v1/stats");
+      const stats = await resp.json();
+      latencies.push(stats.current_latency);
+
+      // A latency of 0 or >100ms would indicate engine restart/cycling
+      if (stats.current_latency === 0 || stats.current_latency > 100) {
+        // Allow first 2s for transition
+        if (i > 4) {
+          restartDetected = true;
+        }
+      }
+    }
+
+    // Engine should NOT have restarted
+    expect(restartDetected).toBe(false);
+
+    // Signal should still be valid (ch0 burst is independent)
+    const finalResp = await request.get("/api/v1/stats");
+    const finalStats = await finalResp.json();
+    expect(finalStats.signal_lost).toBe(false);
+
+    // Recreate the routing point for cleanup
+    await recreateCounterChannel(vbmatrixHost);
+    await new Promise((r) => setTimeout(r, 3000));
   });
 });
