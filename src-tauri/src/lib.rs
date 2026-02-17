@@ -356,6 +356,10 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     counter_silent_since = None;
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(false);
+                        let estimated = store.stats().estimated_loss;
+                        if estimated > 0 {
+                            store.record_loss(estimated);
+                        }
                         store.reset_estimated_loss();
                     }
                 }
@@ -636,6 +640,10 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                             signal_lost_since = Some(std::time::Instant::now());
                             counter_silent_since = None;
                             if let Ok(mut store) = stats.lock() {
+                                let estimated = store.stats().estimated_loss;
+                                if estimated > 0 {
+                                    store.record_loss(estimated);
+                                }
                                 store.reset_estimated_loss();
                             }
                         }
