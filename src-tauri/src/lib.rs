@@ -289,6 +289,9 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     // ASIO restart recovery state (issue #26).
     let mut valid_measurement_seen = false;
     let mut asio_restart_cooldown_until: Option<std::time::Instant> = None;
+    // Counter silence tracking: ch1 muted loopback estimated loss.
+    let mut counter_silent_since: Option<std::time::Instant> = None;
+    let mut cached_sample_rate: u32 = audiotester_core::DEFAULT_SAMPLE_RATE;
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
     if APP_HANDLE.get().is_none() {
@@ -318,6 +321,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         engine_status.sample_rate,
                         0, // Buffer size not exposed by cpal yet
                     );
+                }
+
+                // Cache sample rate for counter silence estimation
+                if engine_status.sample_rate > 0 {
+                    cached_sample_rate = engine_status.sample_rate;
                 }
 
                 // Track if device changed (for reconnection)
@@ -369,8 +377,10 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     last_successful_analysis = None;
                     signal_lost = false;
                     signal_lost_since = None;
+                    counter_silent_since = None;
                     if let Ok(mut store) = stats.lock() {
                         store.set_signal_lost(false);
+                        store.reset_estimated_loss();
                     }
                 }
                 Err(e) => {
@@ -395,6 +405,7 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                 if result.lost_samples > ASIO_RESTART_LOST_THRESHOLD
                     && valid_measurement_seen
                     && !in_cooldown
+                    && !result.counter_silent
                 {
                     tracing::warn!(
                         lost_samples = result.lost_samples,
@@ -433,8 +444,10 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                             last_successful_analysis = None;
                             signal_lost = false;
                             signal_lost_since = None;
+                            counter_silent_since = None;
                             if let Ok(mut store) = stats.lock() {
                                 store.set_signal_lost(false);
+                                store.reset_estimated_loss();
                             }
                             // Start cooldown to prevent cascading restarts.
                             asio_restart_cooldown_until = Some(
@@ -532,6 +545,30 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     }
                     if result.corrupted_samples > 0 {
                         store.record_corruption(result.corrupted_samples as u64);
+                    }
+                }
+
+                // Track counter silence state for estimated loss calculation
+                if result.counter_silent {
+                    if counter_silent_since.is_none() {
+                        counter_silent_since = Some(std::time::Instant::now());
+                        tracing::warn!("Counter signal absent (ch1 muted)");
+                    }
+                    // Compute estimated missing samples from elapsed time
+                    if let Some(since) = counter_silent_since {
+                        let elapsed_secs = since.elapsed().as_secs_f64();
+                        let estimated = (elapsed_secs * cached_sample_rate as f64) as u64;
+                        if let Ok(mut store) = stats.lock() {
+                            store.set_counter_silent(true);
+                            store.set_estimated_loss(estimated);
+                        }
+                    }
+                } else if counter_silent_since.is_some() {
+                    // Recovery from silence
+                    tracing::info!("Counter signal recovered (ch1 unmuted)");
+                    counter_silent_since = None;
+                    if let Ok(mut store) = stats.lock() {
+                        store.reset_estimated_loss();
                     }
                 }
 
@@ -684,6 +721,10 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                             tracing::info!("Engine restarted after signal loss");
                             last_successful_analysis = None;
                             signal_lost_since = Some(std::time::Instant::now());
+                            counter_silent_since = None;
+                            if let Ok(mut store) = stats.lock() {
+                                store.reset_estimated_loss();
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to restart after signal loss");

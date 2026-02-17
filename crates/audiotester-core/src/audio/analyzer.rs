@@ -29,6 +29,20 @@ pub struct AnalysisResult {
     pub is_healthy: bool,
 }
 
+/// Result from frame-based loss detection on the counter channel (ch1).
+///
+/// Distinguishes between confirmed gaps in the counter sequence and
+/// counter signal absence (silence from muted loopback route).
+#[derive(Debug, Clone, Default)]
+pub struct FrameLossResult {
+    /// Real gaps detected in the counter sequence
+    pub confirmed_lost: usize,
+    /// True when the counter signal is absent (all zeros exceeding threshold)
+    pub counter_silent: bool,
+    /// Number of samples that were analyzed in this call
+    pub samples_analyzed: usize,
+}
+
 /// Signal analyzer for loss detection (and legacy MLS correlation)
 ///
 /// Primary use: Frame counter-based loss detection via [`Self::detect_frame_loss`].
@@ -53,6 +67,12 @@ pub struct Analyzer {
     expected_frame: u64,
     /// Whether this analyzer has a valid MLS reference
     has_reference: bool,
+    /// Count of consecutive decoded-zero samples for silence detection
+    consecutive_zeros: usize,
+    /// Number of consecutive zero samples required to declare silence (sample_rate / 10 = 100ms)
+    silence_threshold: usize,
+    /// Whether the previous call was in a silence state (used for recovery resync)
+    was_silent: bool,
 }
 
 impl Analyzer {
@@ -98,6 +118,9 @@ impl Analyzer {
             last_latency: None,
             expected_frame: 0,
             has_reference,
+            consecutive_zeros: 0,
+            silence_threshold: (sample_rate / 10) as usize,
+            was_silent: false,
         }
     }
 
@@ -217,14 +240,18 @@ impl Analyzer {
     /// counter. By tracking the sequence, we can detect gaps indicating lost
     /// samples with high accuracy.
     ///
+    /// Also detects counter signal absence (silence) when the loopback route
+    /// is muted. On recovery from silence, resyncs `expected_frame` to avoid
+    /// reporting a massive false loss spike.
+    ///
     /// # Arguments
     /// * `counter_samples` - Samples from the counter channel (ch1)
     ///
     /// # Returns
-    /// Number of frames lost (gaps in the counter sequence)
-    pub fn detect_frame_loss(&mut self, counter_samples: &[f32]) -> usize {
+    /// [`FrameLossResult`] with confirmed loss count and silence state
+    pub fn detect_frame_loss(&mut self, counter_samples: &[f32]) -> FrameLossResult {
         if counter_samples.is_empty() {
-            return 0;
+            return FrameLossResult::default();
         }
 
         let mut total_lost = 0usize;
@@ -234,7 +261,25 @@ impl Analyzer {
             let normalized = sample.clamp(0.0, 1.0);
             let received_counter = (normalized * 65536.0) as u32 & 0xFFFF;
 
-            if self.expected_frame > 0 {
+            // Track consecutive zeros for silence detection
+            if received_counter == 0 {
+                self.consecutive_zeros += 1;
+            } else {
+                // Non-zero sample received
+                if self.was_silent {
+                    // Recovery from silence: resync expected_frame instead of
+                    // computing a gap. This prevents the massive false loss spike
+                    // that occurs when the counter resumes at a different value.
+                    self.was_silent = false;
+                    self.expected_frame = (received_counter as u64).wrapping_add(1);
+                    self.consecutive_zeros = 0;
+                    continue;
+                }
+                self.consecutive_zeros = 0;
+            }
+
+            // Normal gap detection (only when not in silence)
+            if !self.was_silent && self.expected_frame > 0 {
                 let expected = (self.expected_frame & 0xFFFF) as u32;
 
                 // Calculate difference accounting for wrap-around
@@ -250,10 +295,23 @@ impl Analyzer {
                 }
             }
 
-            self.expected_frame = (received_counter as u64).wrapping_add(1);
+            // Update expected frame (skip when entering silence to freeze tracking)
+            if self.consecutive_zeros < self.silence_threshold {
+                self.expected_frame = (received_counter as u64).wrapping_add(1);
+            }
         }
 
-        total_lost
+        // Determine silence state
+        let counter_silent = self.consecutive_zeros >= self.silence_threshold;
+        if counter_silent {
+            self.was_silent = true;
+        }
+
+        FrameLossResult {
+            confirmed_lost: total_lost,
+            counter_silent,
+            samples_analyzed: counter_samples.len(),
+        }
     }
 
     /// Get the configured sample rate
@@ -270,6 +328,8 @@ impl Analyzer {
     pub fn reset(&mut self) {
         self.last_latency = None;
         self.expected_frame = 0;
+        self.consecutive_zeros = 0;
+        self.was_silent = false;
     }
 }
 
@@ -339,15 +399,16 @@ mod tests {
             samples.push(i as f32 / 65536.0);
         }
 
-        let lost = analyzer.detect_frame_loss(&samples);
+        let result = analyzer.detect_frame_loss(&samples);
         // After frame 99, expected is 100. We receive 105.
         // diff = 105 - 100 = 5, lost = diff - 1 = 4
         // This is because the algorithm detects gap size minus the first received sample
         assert!(
-            (4..=5).contains(&lost),
+            (4..=5).contains(&result.confirmed_lost),
             "Should detect approximately 5 lost frames, got {}",
-            lost
+            result.confirmed_lost
         );
+        assert!(!result.counter_silent);
     }
 
     #[test]
@@ -357,8 +418,9 @@ mod tests {
         // Continuous counter values
         let samples: Vec<f32> = (0..100).map(|i| i as f32 / 65536.0).collect();
 
-        let lost = analyzer.detect_frame_loss(&samples);
-        assert_eq!(lost, 0, "Should detect no lost frames");
+        let result = analyzer.detect_frame_loss(&samples);
+        assert_eq!(result.confirmed_lost, 0, "Should detect no lost frames");
+        assert!(!result.counter_silent);
     }
 
     #[test]
@@ -374,8 +436,12 @@ mod tests {
             samples.push(i as f32 / 65536.0);
         }
 
-        let lost = analyzer.detect_frame_loss(&samples);
-        assert_eq!(lost, 0, "Should handle wrap-around correctly");
+        let result = analyzer.detect_frame_loss(&samples);
+        assert_eq!(
+            result.confirmed_lost, 0,
+            "Should handle wrap-around correctly"
+        );
+        assert!(!result.counter_silent);
     }
 
     #[test]

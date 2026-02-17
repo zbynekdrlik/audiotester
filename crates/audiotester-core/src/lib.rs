@@ -24,7 +24,7 @@ pub use audio::engine::{AudioEngine, ConnectionState};
 pub use audio::latency::{LatencyAnalyzer, LatencyResult};
 
 // Frame-based loss detection
-pub use audio::analyzer::Analyzer;
+pub use audio::analyzer::{Analyzer, FrameLossResult};
 
 // Legacy MLS exports (for backward compatibility and fallback)
 pub use audio::signal::MlsGenerator;

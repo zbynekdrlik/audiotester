@@ -12,6 +12,7 @@
     avg: document.querySelector('[data-testid="avg-value"]'),
     lost: document.querySelector('[data-testid="lost-value"]'),
     corrupted: document.querySelector('[data-testid="corrupted-value"]'),
+    estimatedLoss: document.querySelector('[data-testid="estimated-loss"]'),
   };
 
   // Device info elements
@@ -125,7 +126,26 @@
     if (els.avg)
       els.avg.textContent =
         stats.avg_latency > 0 ? stats.avg_latency.toFixed(2) : "--";
-    if (els.lost) els.lost.textContent = stats.total_lost.toString();
+    if (els.lost) {
+      els.lost.textContent = stats.total_lost.toString();
+      // Color the Lost value based on counter state
+      if (stats.counter_silent) {
+        els.lost.className = "metric-value warning";
+      } else if (stats.total_lost > 0) {
+        els.lost.className = "metric-value error";
+      } else {
+        els.lost.className = "metric-value";
+      }
+    }
+    if (els.estimatedLoss) {
+      if (stats.counter_silent && stats.estimated_loss > 0) {
+        els.estimatedLoss.textContent =
+          "(est. " + formatSampleCount(stats.estimated_loss) + ")";
+        els.estimatedLoss.style.display = "";
+      } else {
+        els.estimatedLoss.style.display = "none";
+      }
+    }
     if (els.corrupted)
       els.corrupted.textContent = stats.total_corrupted.toString();
 
