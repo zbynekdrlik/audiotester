@@ -444,17 +444,20 @@ pub async fn get_loss_timeline(
         _ => 86400, // default 24h
     };
 
-    // Auto bucket sizing based on range (target ~300-360 buckets)
-    let bucket_size = query.bucket_size.unwrap_or(match range_str {
-        "1h" => 10,
-        "6h" => 60,
-        "12h" => 120,
-        _ => 300,
-    });
+    // Auto bucket sizing based on range (target ~288-360 buckets)
+    let bucket_size = query
+        .bucket_size
+        .unwrap_or(match range_str {
+            "1h" => 10,
+            "6h" => 60,
+            "12h" => 120,
+            _ => 300,
+        })
+        .max(10); // Clamp to minimum 10s (archive resolution)
 
-    let buckets = {
-        let store = state.stats.lock().unwrap();
-        store.loss_timeline_data(range_secs, bucket_size)
+    let buckets = match state.stats.lock() {
+        Ok(store) => store.loss_timeline_data(range_secs, bucket_size),
+        Err(_) => Vec::new(),
     };
 
     let response_buckets: Vec<LossTimelineBucket> = buckets
