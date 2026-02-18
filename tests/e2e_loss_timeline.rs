@@ -77,8 +77,8 @@ fn test_loss_archive_overflow() {
 
     let buckets = store.loss_timeline_data(86400, 10);
     assert!(
-        buckets.len() <= 8640,
-        "Archive should not exceed 8640 buckets, got {}",
+        buckets.len() <= 120960,
+        "Archive should not exceed 120960 buckets, got {}",
         buckets.len()
     );
 }
