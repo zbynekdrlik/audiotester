@@ -27,7 +27,7 @@ test.describe("Dashboard Page", () => {
 
   test("shows latency and loss chart sections", async ({ page }) => {
     await expect(page.getByText("Latency History")).toBeVisible();
-    await expect(page.getByText("Sample Loss Events")).toBeVisible();
+    await expect(page.getByText("Sample Loss Timeline")).toBeVisible();
   });
 
   test("WebSocket connects and shows Connected status", async ({ page }) => {
@@ -57,7 +57,7 @@ test.describe("Dashboard Page", () => {
     // Latency History and Sample Loss sections should contain chart containers
     const latencySection = page.getByText("Latency History");
     await expect(latencySection).toBeVisible();
-    const lossSection = page.getByText("Sample Loss Events");
+    const lossSection = page.getByText("Sample Loss Timeline");
     await expect(lossSection).toBeVisible();
   });
 

@@ -26,7 +26,6 @@
 
   // Chart data
   let latencyData = [];
-  let lossData = [];
 
   // Format uptime seconds into human-readable string
   function formatUptime(seconds) {
@@ -39,7 +38,7 @@
     return s + "s";
   }
 
-  // Simple canvas chart renderer
+  // Simple canvas chart renderer (used for latency)
   function drawChart(containerId, data, color, label) {
     const container = document.getElementById(containerId);
     if (!container || data.length === 0) return;
@@ -186,15 +185,232 @@
     if (stats.latency_history && stats.latency_history.length > 0) {
       latencyData = stats.latency_history;
     }
-    if (stats.loss_history && stats.loss_history.length > 0) {
-      lossData = stats.loss_history;
-    }
 
     drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
-    drawChart("loss-chart", lossData, "#ff4040", "Lost samples");
   }
 
-  // Reset button handler
+  // ─── Loss Timeline (Lightweight Charts) ───────────────────────────
+
+  // Convert UTC unix timestamp to local time for chart display.
+  // Lightweight Charts treats all timestamps as UTC, so we shift by
+  // the local timezone offset to show correct local times on the axis.
+  function timeToLocal(utcTimestamp) {
+    var d = new Date(utcTimestamp * 1000);
+    return (
+      Date.UTC(
+        d.getFullYear(),
+        d.getMonth(),
+        d.getDate(),
+        d.getHours(),
+        d.getMinutes(),
+        d.getSeconds(),
+      ) / 1000
+    );
+  }
+
+  var lossChart = null;
+  var lossHistogram = null;
+  var lossMarkers = null;
+  var lossTimelineRange = "24h";
+  var lossRefreshTimer = null;
+  var lastTotalLost = 0;
+
+  function initLossTimeline() {
+    var container = document.getElementById("loss-timeline");
+    if (!container || !window.LightweightCharts) return;
+
+    lossChart = LightweightCharts.createChart(container, {
+      layout: {
+        background: { color: "#0f1729" },
+        textColor: "#8892b0",
+        attributionLogo: false,
+      },
+      grid: {
+        vertLines: { color: "#2a2a4e" },
+        horzLines: { color: "#2a2a4e" },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: "#2a2a4e",
+        rightOffset: 3,
+      },
+      rightPriceScale: {
+        borderColor: "#2a2a4e",
+        mode: 0, // Normal scale with sqrt-transformed values for balanced visual range
+      },
+      crosshair: {
+        mode: 0,
+      },
+    });
+
+    lossHistogram = lossChart.addSeries(LightweightCharts.HistogramSeries, {
+      color: "#ff4040",
+      priceFormat: {
+        type: "custom",
+        formatter: function (price) {
+          var original = Math.round(price * price);
+          if (original >= 1000000) return (original / 1000000).toFixed(1) + "M";
+          if (original >= 1000) return (original / 1000).toFixed(1) + "K";
+          return original.toString();
+        },
+        minMove: 0.01,
+      },
+    });
+
+    // Tooltip overlay for exact loss values on hover
+    var toolTip = document.createElement("div");
+    toolTip.className = "loss-tooltip";
+    toolTip.style.display = "none";
+    container.style.position = "relative";
+    container.appendChild(toolTip);
+
+    lossChart.subscribeCrosshairMove(function (param) {
+      if (
+        !param.point ||
+        !param.time ||
+        param.point.x < 0 ||
+        param.point.y < 0
+      ) {
+        toolTip.style.display = "none";
+        return;
+      }
+      var data = param.seriesData.get(lossHistogram);
+      if (!data || !data.value) {
+        toolTip.style.display = "none";
+        return;
+      }
+      var original = Math.round(data.value * data.value);
+      var formatted;
+      if (original >= 1000000)
+        formatted = (original / 1000000).toFixed(1) + "M";
+      else if (original >= 1000) formatted = (original / 1000).toFixed(1) + "K";
+      else formatted = original.toLocaleString();
+
+      var d = new Date(param.time * 1000);
+      var timeStr = d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      toolTip.innerHTML =
+        '<div class="loss-tooltip-value">' +
+        formatted +
+        " lost</div>" +
+        '<div class="loss-tooltip-time">' +
+        timeStr +
+        "</div>";
+      toolTip.style.display = "block";
+
+      var chartRect = container.getBoundingClientRect();
+      var x = Math.max(0, Math.min(param.point.x - 40, chartRect.width - 90));
+      toolTip.style.left = x + "px";
+      toolTip.style.top = "8px";
+    });
+
+    // Handle resize
+    new ResizeObserver(function () {
+      lossChart.applyOptions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
+    }).observe(container);
+
+    // Setup zoom button handlers
+    var zoomControls = document.getElementById("loss-zoom-controls");
+    if (zoomControls) {
+      zoomControls.addEventListener("click", function (e) {
+        var btn = e.target.closest(".zoom-btn");
+        if (!btn) return;
+        var range = btn.getAttribute("data-range");
+        if (!range) return;
+
+        // Update active state
+        var buttons = zoomControls.querySelectorAll(".zoom-btn");
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].classList.remove("active");
+        }
+        btn.classList.add("active");
+
+        // Fetch new range
+        lossTimelineRange = range;
+        fetchLossTimeline(range);
+      });
+    }
+
+    // Initial fetch
+    fetchLossTimeline(lossTimelineRange);
+
+    // Refresh every 30 seconds
+    lossRefreshTimer = setInterval(function () {
+      fetchLossTimeline(lossTimelineRange);
+    }, 30000);
+  }
+
+  function fetchLossTimeline(range) {
+    fetch("/api/v1/loss-timeline?range=" + range)
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        if (!lossHistogram || !data.buckets) return;
+        var bucketSize = data.bucket_size_secs || 300;
+        var chartData = data.buckets.map(function (b) {
+          return {
+            time: timeToLocal(b.t),
+            value: b.loss > 0 ? Math.sqrt(b.loss) : 0,
+            color:
+              b.loss > 1000
+                ? "#ff4040"
+                : b.loss > 0
+                  ? "#ff8040"
+                  : "transparent",
+          };
+        });
+
+        // Ensure data extends to "now" so the right edge represents current time
+        var nowUtc = Math.floor(Date.now() / 1000);
+        var nowAligned = nowUtc - (nowUtc % bucketSize);
+        var nowLocal = timeToLocal(nowAligned);
+        if (
+          chartData.length > 0 &&
+          chartData[chartData.length - 1].time < nowLocal
+        ) {
+          chartData.push({ time: nowLocal, value: 0, color: "transparent" });
+        }
+
+        lossHistogram.setData(chartData);
+
+        // Add "Now" marker at the current time position
+        var markerTime =
+          chartData.length > 0
+            ? chartData[chartData.length - 1].time
+            : nowLocal;
+        var markerDef = [
+          {
+            time: markerTime,
+            position: "aboveBar",
+            color: "#00d4ff",
+            shape: "arrowDown",
+            text: "Now",
+          },
+        ];
+        if (lossMarkers) {
+          lossMarkers.setMarkers(markerDef);
+        } else if (LightweightCharts.createSeriesMarkers) {
+          lossMarkers = LightweightCharts.createSeriesMarkers(
+            lossHistogram,
+            markerDef,
+          );
+        }
+      })
+      .catch(function (err) {
+        console.error("Failed to fetch loss timeline:", err);
+      });
+  }
+
+  // ─── Reset button handler ─────────────────────────────────────────
+
   if (resetBtn) {
     resetBtn.addEventListener("click", function () {
       fetch("/api/v1/reset", { method: "POST" })
@@ -212,7 +428,8 @@
     });
   }
 
-  // WebSocket connection with auto-reconnect
+  // ─── WebSocket connection with auto-reconnect ─────────────────────
+
   let ws = null;
   let reconnectTimer = null;
 
@@ -234,6 +451,14 @@
         const stats = JSON.parse(event.data);
         updateSummary(stats);
         updateCharts(stats);
+
+        // Trigger timeline refresh if loss changed
+        if (stats.total_lost !== lastTotalLost) {
+          lastTotalLost = stats.total_lost;
+          if (lossHistogram) {
+            fetchLossTimeline(lossTimelineRange);
+          }
+        }
       } catch (e) {
         console.error("Failed to parse stats:", e);
       }
@@ -250,10 +475,9 @@
     };
   }
 
-  // Redraw charts on window resize
+  // Redraw latency chart on window resize
   window.addEventListener("resize", function () {
     drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
-    drawChart("loss-chart", lossData, "#ff4040", "Lost samples");
   });
 
   // Fetch and display remote URL
@@ -309,5 +533,6 @@
 
   loadVersionInfo();
   loadRemoteUrl();
+  initLossTimeline();
   connect();
 })();

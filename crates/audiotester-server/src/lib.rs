@@ -280,6 +280,10 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/v1/reset", axum::routing::post(api::reset_stats))
         .route(
+            "/api/v1/loss-timeline",
+            axum::routing::get(api::get_loss_timeline),
+        )
+        .route(
             "/api/v1/remote-url",
             axum::routing::get(api::get_remote_url),
         )
