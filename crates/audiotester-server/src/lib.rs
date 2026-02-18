@@ -284,6 +284,10 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(api::get_loss_timeline),
         )
         .route(
+            "/api/v1/latency-timeline",
+            axum::routing::get(api::get_latency_timeline),
+        )
+        .route(
             "/api/v1/remote-url",
             axum::routing::get(api::get_remote_url),
         )

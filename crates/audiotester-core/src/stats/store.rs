@@ -9,13 +9,16 @@ use std::collections::VecDeque;
 const MAX_HISTORY_SIZE: usize = 3600; // 1 hour at 1 sample/sec
 
 /// Maximum number of data points in archive (down-sampled)
-const MAX_ARCHIVE_SIZE: usize = 8640; // 24 hours at 10-second intervals
+const MAX_ARCHIVE_SIZE: usize = 120960; // 14 days at 10-second intervals
 
 /// Duration of each loss archive bucket in seconds
 const LOSS_BUCKET_DURATION_SECS: i64 = 10;
 
-/// Maximum number of loss archive buckets (24h at 10s = 8640)
-const MAX_LOSS_ARCHIVE_SIZE: usize = 8640;
+/// Maximum number of loss archive buckets (14 days at 10s = 120960)
+const MAX_LOSS_ARCHIVE_SIZE: usize = 120960;
+
+/// Maximum number of latency bucket archive entries (14 days at 10s = 120960)
+const MAX_LATENCY_BUCKET_ARCHIVE_SIZE: usize = 120960;
 
 /// A single measurement point
 #[derive(Debug, Clone)]
@@ -57,6 +60,23 @@ pub struct LossBucket {
     pub event_count: u32,
 }
 
+/// Aggregated latency over a fixed time window (10 seconds)
+#[derive(Debug, Clone)]
+pub struct LatencyBucket {
+    /// Start of this bucket (truncated to LOSS_BUCKET_DURATION_SECS boundary)
+    pub timestamp: DateTime<Utc>,
+    /// Average latency in this bucket (ms)
+    pub avg_latency: f64,
+    /// Minimum latency in this bucket (ms)
+    pub min_latency: f64,
+    /// Maximum latency in this bucket (ms)
+    pub max_latency: f64,
+    /// Number of measurements in this bucket
+    pub count: u32,
+    /// Running sum for incremental average calculation
+    sum_latency: f64,
+}
+
 /// Statistics store for time-series data
 #[derive(Debug)]
 pub struct StatsStore {
@@ -72,8 +92,10 @@ pub struct StatsStore {
     disconnection_events: Vec<DisconnectionEvent>,
     /// Loss events with timestamps
     loss_events: Vec<LossEvent>,
-    /// Loss archive: 10-second buckets for 24h timeline
+    /// Loss archive: 10-second buckets for 14d timeline
     loss_archive: VecDeque<LossBucket>,
+    /// Latency bucket archive: 10-second buckets for 14d timeline
+    latency_bucket_archive: VecDeque<LatencyBucket>,
     /// Maximum history size
     max_size: usize,
     /// Maximum archive size
@@ -134,6 +156,7 @@ impl StatsStore {
             disconnection_events: Vec::new(),
             loss_events: Vec::new(),
             loss_archive: VecDeque::with_capacity(MAX_LOSS_ARCHIVE_SIZE),
+            latency_bucket_archive: VecDeque::with_capacity(MAX_LATENCY_BUCKET_ARCHIVE_SIZE),
             max_size: MAX_HISTORY_SIZE,
             max_archive_size: MAX_ARCHIVE_SIZE,
             stats: RunningStats {
@@ -149,8 +172,9 @@ impl StatsStore {
     /// # Arguments
     /// * `latency_ms` - Latency in milliseconds
     pub fn record_latency(&mut self, latency_ms: f64) {
+        let now = Utc::now();
         let measurement = Measurement {
-            timestamp: Utc::now(),
+            timestamp: now,
             value: latency_ms,
         };
 
@@ -167,6 +191,42 @@ impl StatsStore {
                 self.latency_archive.pop_front();
             }
             self.latency_archive.push_back(measurement);
+        }
+
+        // Aggregate into latency_bucket_archive (10s buckets)
+        let bucket_ts = Self::truncate_to_bucket(now);
+        if let Some(last) = self.latency_bucket_archive.back_mut() {
+            if last.timestamp == bucket_ts {
+                // Same bucket — update running stats
+                last.sum_latency += latency_ms;
+                last.count += 1;
+                last.avg_latency = last.sum_latency / last.count as f64;
+                last.min_latency = last.min_latency.min(latency_ms);
+                last.max_latency = last.max_latency.max(latency_ms);
+            } else {
+                // New bucket
+                if self.latency_bucket_archive.len() >= MAX_LATENCY_BUCKET_ARCHIVE_SIZE {
+                    self.latency_bucket_archive.pop_front();
+                }
+                self.latency_bucket_archive.push_back(LatencyBucket {
+                    timestamp: bucket_ts,
+                    avg_latency: latency_ms,
+                    min_latency: latency_ms,
+                    max_latency: latency_ms,
+                    count: 1,
+                    sum_latency: latency_ms,
+                });
+            }
+        } else {
+            // First bucket ever
+            self.latency_bucket_archive.push_back(LatencyBucket {
+                timestamp: bucket_ts,
+                avg_latency: latency_ms,
+                min_latency: latency_ms,
+                max_latency: latency_ms,
+                count: 1,
+                sum_latency: latency_ms,
+            });
         }
 
         // Update running stats
@@ -279,6 +339,7 @@ impl StatsStore {
         self.disconnection_events.clear();
         self.loss_events.clear();
         self.loss_archive.clear();
+        self.latency_bucket_archive.clear();
         self.archive_counter = 0;
         self.stats = RunningStats {
             min_latency: f64::MAX,
@@ -417,6 +478,70 @@ impl StatsStore {
         }
 
         result
+    }
+
+    /// Query latency timeline data for a given time range, re-aggregated into larger buckets.
+    ///
+    /// # Arguments
+    /// * `range_secs` - How far back to look (e.g. 3600 for 1h, 1209600 for 14d)
+    /// * `bucket_size_secs` - Desired output bucket size in seconds (must be >= 10)
+    ///
+    /// # Returns
+    /// Vector of (unix_timestamp, avg_latency, min_latency, max_latency) tuples, sorted by time
+    pub fn latency_timeline_data(
+        &self,
+        range_secs: i64,
+        bucket_size_secs: i64,
+    ) -> Vec<(i64, f64, f64, f64)> {
+        let now = Utc::now();
+        let cutoff = now - chrono::Duration::seconds(range_secs);
+        let bucket_size = bucket_size_secs.max(LOSS_BUCKET_DURATION_SECS);
+
+        // Filter to range
+        let in_range: Vec<&LatencyBucket> = self
+            .latency_bucket_archive
+            .iter()
+            .filter(|b| b.timestamp >= cutoff)
+            .collect();
+
+        if in_range.is_empty() {
+            return Vec::new();
+        }
+
+        // Re-aggregate into requested bucket size using weighted averages
+        let mut result: Vec<(i64, f64, f64, f64, f64, u32)> = Vec::new(); // (ts, sum, min, max, _, count)
+
+        for bucket in in_range {
+            let ts = bucket.timestamp.timestamp();
+            let aligned_ts = ts - (ts % bucket_size);
+
+            if let Some(last) = result.last_mut() {
+                if last.0 == aligned_ts {
+                    last.1 += bucket.sum_latency;
+                    last.2 = last.2.min(bucket.min_latency);
+                    last.3 = last.3.max(bucket.max_latency);
+                    last.5 += bucket.count;
+                    continue;
+                }
+            }
+            result.push((
+                aligned_ts,
+                bucket.sum_latency,
+                bucket.min_latency,
+                bucket.max_latency,
+                0.0,
+                bucket.count,
+            ));
+        }
+
+        // Convert to final format with weighted average
+        result
+            .into_iter()
+            .map(|(ts, sum, min, max, _, count)| {
+                let avg = if count > 0 { sum / count as f64 } else { 0.0 };
+                (ts, avg, min, max)
+            })
+            .collect()
     }
 
     /// Record a disconnection event

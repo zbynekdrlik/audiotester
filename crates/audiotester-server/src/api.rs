@@ -401,7 +401,7 @@ pub async fn toggle_monitoring(
 /// Query parameters for GET /api/v1/loss-timeline
 #[derive(Deserialize)]
 pub struct LossTimelineQuery {
-    /// Time range: "1h", "6h", "12h", "24h" (default: "24h")
+    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
     pub range: Option<String>,
     /// Bucket size in seconds (default: auto based on range)
     pub bucket_size: Option<i64>,
@@ -435,13 +435,16 @@ pub async fn get_loss_timeline(
     State(state): State<AppState>,
     axum::extract::Query(query): axum::extract::Query<LossTimelineQuery>,
 ) -> Json<LossTimelineResponse> {
-    let range_str = query.range.as_deref().unwrap_or("24h");
+    let range_str = query.range.as_deref().unwrap_or("14d");
 
     let range_secs: i64 = match range_str {
         "1h" => 3600,
         "6h" => 21600,
         "12h" => 43200,
-        _ => 86400, // default 24h
+        "24h" => 86400,
+        "3d" => 259200,
+        "7d" => 604800,
+        _ => 1209600, // default 14d
     };
 
     // Auto bucket sizing based on range (target ~288-360 buckets)
@@ -451,7 +454,10 @@ pub async fn get_loss_timeline(
             "1h" => 10,
             "6h" => 60,
             "12h" => 120,
-            _ => 300,
+            "24h" => 300,
+            "3d" => 900,
+            "7d" => 1800,
+            _ => 3600,
         })
         .max(10); // Clamp to minimum 10s (archive resolution)
 
@@ -466,6 +472,86 @@ pub async fn get_loss_timeline(
         .collect();
 
     Json(LossTimelineResponse {
+        bucket_size_secs: bucket_size,
+        buckets: response_buckets,
+    })
+}
+
+/// Query parameters for GET /api/v1/latency-timeline
+#[derive(Deserialize)]
+pub struct LatencyTimelineQuery {
+    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
+    pub range: Option<String>,
+    /// Bucket size in seconds (default: auto based on range)
+    pub bucket_size: Option<i64>,
+}
+
+/// A single bucket in the latency timeline response
+#[derive(Serialize)]
+pub struct LatencyTimelineBucket {
+    /// Unix timestamp (start of bucket)
+    pub t: i64,
+    /// Average latency in this bucket (ms)
+    pub avg: f64,
+    /// Minimum latency in this bucket (ms)
+    pub min: f64,
+    /// Maximum latency in this bucket (ms)
+    pub max: f64,
+}
+
+/// Latency timeline response
+#[derive(Serialize)]
+pub struct LatencyTimelineResponse {
+    /// Bucket size in seconds
+    pub bucket_size_secs: i64,
+    /// Bucketed latency data
+    pub buckets: Vec<LatencyTimelineBucket>,
+}
+
+/// GET /api/v1/latency-timeline
+///
+/// Returns bucketed latency data for the timeline chart.
+/// Supports range parameter for zoom levels and auto bucket sizing.
+pub async fn get_latency_timeline(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<LatencyTimelineQuery>,
+) -> Json<LatencyTimelineResponse> {
+    let range_str = query.range.as_deref().unwrap_or("14d");
+
+    let range_secs: i64 = match range_str {
+        "1h" => 3600,
+        "6h" => 21600,
+        "12h" => 43200,
+        "24h" => 86400,
+        "3d" => 259200,
+        "7d" => 604800,
+        _ => 1209600, // default 14d
+    };
+
+    let bucket_size = query
+        .bucket_size
+        .unwrap_or(match range_str {
+            "1h" => 10,
+            "6h" => 60,
+            "12h" => 120,
+            "24h" => 300,
+            "3d" => 900,
+            "7d" => 1800,
+            _ => 3600,
+        })
+        .max(10);
+
+    let buckets = match state.stats.lock() {
+        Ok(store) => store.latency_timeline_data(range_secs, bucket_size),
+        Err(_) => Vec::new(),
+    };
+
+    let response_buckets: Vec<LatencyTimelineBucket> = buckets
+        .into_iter()
+        .map(|(t, avg, min, max)| LatencyTimelineBucket { t, avg, min, max })
+        .collect();
+
+    Json(LatencyTimelineResponse {
         bucket_size_secs: bucket_size,
         buckets: response_buckets,
     })

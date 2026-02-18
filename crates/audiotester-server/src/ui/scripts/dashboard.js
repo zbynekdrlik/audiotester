@@ -24,9 +24,6 @@
   const remoteUrlEl = document.getElementById("remote-url");
   const resetBtn = document.getElementById("reset-btn");
 
-  // Chart data
-  let latencyData = [];
-
   // Format uptime seconds into human-readable string
   function formatUptime(seconds) {
     if (!seconds || seconds === 0) return "--";
@@ -36,70 +33,6 @@
     if (h > 0) return h + "h " + m + "m";
     if (m > 0) return m + "m " + s + "s";
     return s + "s";
-  }
-
-  // Simple canvas chart renderer (used for latency)
-  function drawChart(containerId, data, color, label) {
-    const container = document.getElementById(containerId);
-    if (!container || data.length === 0) return;
-
-    let canvas = container.querySelector("canvas");
-    if (!canvas) {
-      canvas = document.createElement("canvas");
-      container.appendChild(canvas);
-    }
-
-    const rect = container.getBoundingClientRect();
-    canvas.width = rect.width;
-    canvas.height = rect.height;
-
-    const ctx = canvas.getContext("2d");
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const values = data.map((d) => d[1]);
-    const minVal = Math.min(...values, 0);
-    const maxVal = Math.max(...values, 1);
-    const range = maxVal - minVal || 1;
-
-    const pad = { top: 20, right: 10, bottom: 25, left: 50 };
-    const w = canvas.width - pad.left - pad.right;
-    const h = canvas.height - pad.top - pad.bottom;
-
-    // Draw grid
-    ctx.strokeStyle = "#2a2a4e";
-    ctx.lineWidth = 1;
-    for (let i = 0; i <= 4; i++) {
-      const y = pad.top + (h * i) / 4;
-      ctx.beginPath();
-      ctx.moveTo(pad.left, y);
-      ctx.lineTo(pad.left + w, y);
-      ctx.stroke();
-
-      // Y-axis labels
-      const val = maxVal - (range * i) / 4;
-      ctx.fillStyle = "#8892b0";
-      ctx.font = "10px monospace";
-      ctx.textAlign = "right";
-      ctx.fillText(val.toFixed(1), pad.left - 5, y + 3);
-    }
-
-    // Draw line
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    for (let i = 0; i < data.length; i++) {
-      const x = pad.left + (w * i) / (data.length - 1 || 1);
-      const y = pad.top + h - ((values[i] - minVal) / range) * h;
-      if (i === 0) ctx.moveTo(x, y);
-      else ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-
-    // Label
-    ctx.fillStyle = color;
-    ctx.font = "11px sans-serif";
-    ctx.textAlign = "left";
-    ctx.fillText(label, pad.left + 5, pad.top - 5);
   }
 
   function updateSummary(stats) {
@@ -181,15 +114,7 @@
     return count.toString();
   }
 
-  function updateCharts(stats) {
-    if (stats.latency_history && stats.latency_history.length > 0) {
-      latencyData = stats.latency_history;
-    }
-
-    drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
-  }
-
-  // ─── Loss Timeline (Lightweight Charts) ───────────────────────────
+  // ─── Shared: UTC to local timestamp conversion ─────────────────────
 
   // Convert UTC unix timestamp to local time for chart display.
   // Lightweight Charts treats all timestamps as UTC, so we shift by
@@ -208,10 +133,12 @@
     );
   }
 
+  // ─── Loss Timeline (Lightweight Charts) ───────────────────────────
+
   var lossChart = null;
   var lossHistogram = null;
   var lossMarkers = null;
-  var lossTimelineRange = "24h";
+  var lossTimelineRange = "14d";
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
 
@@ -409,6 +336,181 @@
       });
   }
 
+  // ─── Latency Timeline (Lightweight Charts) ────────────────────────
+
+  var latencyChart = null;
+  var latencyLine = null;
+  var latencyMarkers = null;
+  var latencyTimelineRange = "14d";
+  var latencyRefreshTimer = null;
+
+  function initLatencyTimeline() {
+    var container = document.getElementById("latency-chart");
+    if (!container || !window.LightweightCharts) return;
+
+    latencyChart = LightweightCharts.createChart(container, {
+      layout: {
+        background: { color: "#0f1729" },
+        textColor: "#8892b0",
+        attributionLogo: false,
+      },
+      grid: {
+        vertLines: { color: "#2a2a4e" },
+        horzLines: { color: "#2a2a4e" },
+      },
+      timeScale: {
+        timeVisible: true,
+        secondsVisible: false,
+        borderColor: "#2a2a4e",
+        rightOffset: 3,
+      },
+      rightPriceScale: {
+        borderColor: "#2a2a4e",
+      },
+      crosshair: {
+        mode: 0,
+      },
+    });
+
+    latencyLine = latencyChart.addSeries(LightweightCharts.LineSeries, {
+      color: "#00a0ff",
+      lineWidth: 2,
+      priceFormat: {
+        type: "custom",
+        formatter: function (price) {
+          return price.toFixed(2) + " ms";
+        },
+        minMove: 0.01,
+      },
+    });
+
+    // Tooltip overlay for exact latency values on hover
+    var toolTip = document.createElement("div");
+    toolTip.className = "latency-tooltip";
+    toolTip.style.display = "none";
+    container.style.position = "relative";
+    container.appendChild(toolTip);
+
+    latencyChart.subscribeCrosshairMove(function (param) {
+      if (
+        !param.point ||
+        !param.time ||
+        param.point.x < 0 ||
+        param.point.y < 0
+      ) {
+        toolTip.style.display = "none";
+        return;
+      }
+      var data = param.seriesData.get(latencyLine);
+      if (!data || data.value === undefined) {
+        toolTip.style.display = "none";
+        return;
+      }
+
+      var d = new Date(param.time * 1000);
+      var timeStr = d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      toolTip.innerHTML =
+        '<div class="latency-tooltip-value">' +
+        data.value.toFixed(2) +
+        " ms</div>" +
+        '<div class="latency-tooltip-time">' +
+        timeStr +
+        "</div>";
+      toolTip.style.display = "block";
+
+      var chartRect = container.getBoundingClientRect();
+      var x = Math.max(0, Math.min(param.point.x - 40, chartRect.width - 90));
+      toolTip.style.left = x + "px";
+      toolTip.style.top = "8px";
+    });
+
+    // Handle resize
+    new ResizeObserver(function () {
+      latencyChart.applyOptions({
+        width: container.clientWidth,
+        height: container.clientHeight,
+      });
+    }).observe(container);
+
+    // Setup zoom button handlers
+    var zoomControls = document.getElementById("latency-zoom-controls");
+    if (zoomControls) {
+      zoomControls.addEventListener("click", function (e) {
+        var btn = e.target.closest(".zoom-btn");
+        if (!btn) return;
+        var range = btn.getAttribute("data-range");
+        if (!range) return;
+
+        // Update active state
+        var buttons = zoomControls.querySelectorAll(".zoom-btn");
+        for (var i = 0; i < buttons.length; i++) {
+          buttons[i].classList.remove("active");
+        }
+        btn.classList.add("active");
+
+        // Fetch new range
+        latencyTimelineRange = range;
+        fetchLatencyTimeline(range);
+      });
+    }
+
+    // Initial fetch
+    fetchLatencyTimeline(latencyTimelineRange);
+
+    // Refresh every 30 seconds
+    latencyRefreshTimer = setInterval(function () {
+      fetchLatencyTimeline(latencyTimelineRange);
+    }, 30000);
+  }
+
+  function fetchLatencyTimeline(range) {
+    fetch("/api/v1/latency-timeline?range=" + range)
+      .then(function (r) {
+        return r.json();
+      })
+      .then(function (data) {
+        if (!latencyLine || !data.buckets) return;
+        var chartData = data.buckets
+          .filter(function (b) {
+            return b.avg > 0;
+          })
+          .map(function (b) {
+            return { time: timeToLocal(b.t), value: b.avg };
+          });
+
+        latencyLine.setData(chartData);
+
+        // Add "Now" marker on the last data point
+        if (chartData.length > 0) {
+          var markerTime = chartData[chartData.length - 1].time;
+          var markerDef = [
+            {
+              time: markerTime,
+              position: "aboveBar",
+              color: "#00d4ff",
+              shape: "arrowDown",
+              text: "Now",
+            },
+          ];
+          if (latencyMarkers) {
+            latencyMarkers.setMarkers(markerDef);
+          } else if (LightweightCharts.createSeriesMarkers) {
+            latencyMarkers = LightweightCharts.createSeriesMarkers(
+              latencyLine,
+              markerDef,
+            );
+          }
+        }
+      })
+      .catch(function (err) {
+        console.error("Failed to fetch latency timeline:", err);
+      });
+  }
+
   // ─── Reset button handler ─────────────────────────────────────────
 
   if (resetBtn) {
@@ -450,14 +552,18 @@
       try {
         const stats = JSON.parse(event.data);
         updateSummary(stats);
-        updateCharts(stats);
 
-        // Trigger timeline refresh if loss changed
+        // Trigger loss timeline refresh if loss changed
         if (stats.total_lost !== lastTotalLost) {
           lastTotalLost = stats.total_lost;
           if (lossHistogram) {
             fetchLossTimeline(lossTimelineRange);
           }
+        }
+
+        // Trigger latency timeline refresh on new data
+        if (latencyLine && stats.measurement_count > 0) {
+          fetchLatencyTimeline(latencyTimelineRange);
         }
       } catch (e) {
         console.error("Failed to parse stats:", e);
@@ -474,11 +580,6 @@
       ws.close();
     };
   }
-
-  // Redraw latency chart on window resize
-  window.addEventListener("resize", function () {
-    drawChart("latency-chart", latencyData, "#00a0ff", "Latency (ms)");
-  });
 
   // Fetch and display remote URL
   function loadRemoteUrl() {
@@ -534,5 +635,6 @@
   loadVersionInfo();
   loadRemoteUrl();
   initLossTimeline();
+  initLatencyTimeline();
   connect();
 })();
