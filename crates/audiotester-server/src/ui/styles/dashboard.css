@@ -296,6 +296,28 @@ main {
   height: 100% !important;
 }
 
+.loss-tooltip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  background: rgba(15, 23, 41, 0.92);
+  border: 1px solid #2a2a4e;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.loss-tooltip-value {
+  color: #ff8040;
+  font-weight: 600;
+}
+
+.loss-tooltip-time {
+  color: #8892b0;
+  font-size: 11px;
+}
+
 @media (max-width: 600px) {
   .summary-bar {
     gap: 0.8rem;

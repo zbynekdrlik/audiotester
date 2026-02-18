@@ -258,6 +258,56 @@
       },
     });
 
+    // Tooltip overlay for exact loss values on hover
+    var toolTip = document.createElement("div");
+    toolTip.className = "loss-tooltip";
+    toolTip.style.display = "none";
+    container.style.position = "relative";
+    container.appendChild(toolTip);
+
+    lossChart.subscribeCrosshairMove(function (param) {
+      if (
+        !param.point ||
+        !param.time ||
+        param.point.x < 0 ||
+        param.point.y < 0
+      ) {
+        toolTip.style.display = "none";
+        return;
+      }
+      var data = param.seriesData.get(lossHistogram);
+      if (!data || !data.value) {
+        toolTip.style.display = "none";
+        return;
+      }
+      var original = Math.round(data.value * data.value);
+      var formatted;
+      if (original >= 1000000)
+        formatted = (original / 1000000).toFixed(1) + "M";
+      else if (original >= 1000) formatted = (original / 1000).toFixed(1) + "K";
+      else formatted = original.toLocaleString();
+
+      var d = new Date(param.time * 1000);
+      var timeStr = d.toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      });
+
+      toolTip.innerHTML =
+        '<div class="loss-tooltip-value">' +
+        formatted +
+        " lost</div>" +
+        '<div class="loss-tooltip-time">' +
+        timeStr +
+        "</div>";
+      toolTip.style.display = "block";
+
+      var chartRect = container.getBoundingClientRect();
+      var x = Math.max(0, Math.min(param.point.x - 40, chartRect.width - 90));
+      toolTip.style.left = x + "px";
+      toolTip.style.top = "8px";
+    });
+
     // Handle resize
     new ResizeObserver(function () {
       lossChart.applyOptions({
