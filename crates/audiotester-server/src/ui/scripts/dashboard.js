@@ -7,9 +7,6 @@
   // Summary bar elements
   const els = {
     latency: document.querySelector('[data-testid="latency-value"]'),
-    min: document.querySelector('[data-testid="min-value"]'),
-    max: document.querySelector('[data-testid="max-value"]'),
-    avg: document.querySelector('[data-testid="avg-value"]'),
     lost: document.querySelector('[data-testid="lost-value"]'),
     corrupted: document.querySelector('[data-testid="corrupted-value"]'),
   };
@@ -48,15 +45,6 @@
             ? " warning"
             : " error");
     }
-    if (els.min)
-      els.min.textContent =
-        stats.min_latency > 0 ? stats.min_latency.toFixed(2) : "--";
-    if (els.max)
-      els.max.textContent =
-        stats.max_latency > 0 ? stats.max_latency.toFixed(2) : "--";
-    if (els.avg)
-      els.avg.textContent =
-        stats.avg_latency > 0 ? stats.avg_latency.toFixed(2) : "--";
     if (els.lost) {
       if (stats.counter_silent && stats.estimated_loss > 0) {
         // During silence: show combined total with ~ prefix
