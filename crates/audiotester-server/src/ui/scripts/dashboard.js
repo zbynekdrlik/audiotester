@@ -223,6 +223,7 @@
       layout: {
         background: { color: "#0f1729" },
         textColor: "#8892b0",
+        attributionLogo: false,
       },
       grid: {
         vertLines: { color: "#2a2a4e" },
@@ -236,7 +237,7 @@
       },
       rightPriceScale: {
         borderColor: "#2a2a4e",
-        mode: 1, // Logarithmic scale — large spikes don't squash small losses
+        mode: 0, // Normal scale with sqrt-transformed values for balanced visual range
       },
       crosshair: {
         mode: 0,
@@ -245,7 +246,16 @@
 
     lossHistogram = lossChart.addSeries(LightweightCharts.HistogramSeries, {
       color: "#ff4040",
-      priceFormat: { type: "volume" },
+      priceFormat: {
+        type: "custom",
+        formatter: function (price) {
+          var original = Math.round(price * price);
+          if (original >= 1000000) return (original / 1000000).toFixed(1) + "M";
+          if (original >= 1000) return (original / 1000).toFixed(1) + "K";
+          return original.toString();
+        },
+        minMove: 0.01,
+      },
     });
 
     // Handle resize
@@ -298,7 +308,7 @@
         var chartData = data.buckets.map(function (b) {
           return {
             time: timeToLocal(b.t),
-            value: b.loss,
+            value: b.loss > 0 ? Math.sqrt(b.loss) : 0,
             color:
               b.loss > 1000
                 ? "#ff4040"

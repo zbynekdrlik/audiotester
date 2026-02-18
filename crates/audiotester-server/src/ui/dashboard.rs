@@ -80,10 +80,6 @@ fn DashboardPage() -> impl IntoView {
                     </div>
                     <section class="charts">
                         <div class="chart-container">
-                            <h2>"Latency History"</h2>
-                            <div id="latency-chart" class="chart"></div>
-                        </div>
-                        <div class="chart-container">
                             <div class="chart-header">
                                 <h2>"Sample Loss Timeline"</h2>
                                 <div class="zoom-controls" id="loss-zoom-controls">
@@ -94,6 +90,10 @@ fn DashboardPage() -> impl IntoView {
                                 </div>
                             </div>
                             <div id="loss-timeline" class="chart" data-testid="loss-timeline"></div>
+                        </div>
+                        <div class="chart-container">
+                            <h2>"Latency History"</h2>
+                            <div id="latency-chart" class="chart"></div>
                         </div>
                     </section>
                 </main>
