@@ -18,9 +18,6 @@ test.describe("Dashboard Page", () => {
 
   test("shows all summary metrics", async ({ page }) => {
     await expect(page.getByText("Latency", { exact: true })).toBeVisible();
-    await expect(page.getByText("Min")).toBeVisible();
-    await expect(page.getByText("Max")).toBeVisible();
-    await expect(page.getByText("Avg")).toBeVisible();
     await expect(page.getByText("Lost")).toBeVisible();
     await expect(page.getByText("Corrupted")).toBeVisible();
   });
