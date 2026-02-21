@@ -2,7 +2,7 @@
 
 use leptos::prelude::*;
 
-/// Summary bar showing current latency, min/max/avg, lost, and corrupted counts
+/// Summary bar showing current latency, lost, and corrupted counts
 #[component]
 pub fn SummaryBar() -> impl IntoView {
     view! {
@@ -10,21 +10,6 @@ pub fn SummaryBar() -> impl IntoView {
             <div class="metric">
                 <span class="metric-label">"Latency"</span>
                 <span class="metric-value" data-testid="latency-value">"--"</span>
-                <span class="metric-unit">"ms"</span>
-            </div>
-            <div class="metric">
-                <span class="metric-label">"Min"</span>
-                <span class="metric-value" data-testid="min-value">"--"</span>
-                <span class="metric-unit">"ms"</span>
-            </div>
-            <div class="metric">
-                <span class="metric-label">"Max"</span>
-                <span class="metric-value" data-testid="max-value">"--"</span>
-                <span class="metric-unit">"ms"</span>
-            </div>
-            <div class="metric">
-                <span class="metric-label">"Avg"</span>
-                <span class="metric-value" data-testid="avg-value">"--"</span>
                 <span class="metric-unit">"ms"</span>
             </div>
             <div class="metric">

@@ -318,6 +318,28 @@ main {
   font-size: 11px;
 }
 
+.latency-tooltip {
+  position: absolute;
+  z-index: 10;
+  pointer-events: none;
+  background: rgba(15, 23, 41, 0.92);
+  border: 1px solid #2a2a4e;
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.latency-tooltip-value {
+  color: #00a0ff;
+  font-weight: 600;
+}
+
+.latency-tooltip-time {
+  color: #8892b0;
+  font-size: 11px;
+}
+
 @media (max-width: 600px) {
   .summary-bar {
     gap: 0.8rem;

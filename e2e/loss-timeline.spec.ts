@@ -16,7 +16,7 @@ test.describe("Loss Timeline API", () => {
   test("GET /api/v1/loss-timeline accepts range parameter", async ({
     request,
   }) => {
-    const ranges = ["1h", "6h", "12h", "24h"];
+    const ranges = ["1h", "6h", "12h", "24h", "3d", "7d", "14d"];
     for (const range of ranges) {
       const resp = await request.get(`/api/v1/loss-timeline?range=${range}`);
       expect(resp.ok()).toBeTruthy();
@@ -53,6 +53,33 @@ test.describe("Loss Timeline API", () => {
     expect(body.bucket_size_secs).toBe(300);
   });
 
+  test("GET /api/v1/loss-timeline 3d range uses 900s buckets", async ({
+    request,
+  }) => {
+    const resp = await request.get("/api/v1/loss-timeline?range=3d");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+    expect(body.bucket_size_secs).toBe(900);
+  });
+
+  test("GET /api/v1/loss-timeline 7d range uses 1800s buckets", async ({
+    request,
+  }) => {
+    const resp = await request.get("/api/v1/loss-timeline?range=7d");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+    expect(body.bucket_size_secs).toBe(1800);
+  });
+
+  test("GET /api/v1/loss-timeline 14d range uses 3600s buckets", async ({
+    request,
+  }) => {
+    const resp = await request.get("/api/v1/loss-timeline?range=14d");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+    expect(body.bucket_size_secs).toBe(3600);
+  });
+
   test("GET /api/v1/loss-timeline buckets have correct shape", async ({
     request,
   }) => {
@@ -84,31 +111,40 @@ test.describe("Loss Timeline UI", () => {
     const controls = page.locator("#loss-zoom-controls");
     await expect(controls).toBeVisible();
 
-    // Verify all four zoom buttons exist
+    // Verify all seven zoom buttons exist
     const buttons = controls.locator(".zoom-btn");
-    await expect(buttons).toHaveCount(4);
+    await expect(buttons).toHaveCount(7);
 
     // Verify button labels
     await expect(buttons.nth(0)).toHaveText("1h");
     await expect(buttons.nth(1)).toHaveText("6h");
     await expect(buttons.nth(2)).toHaveText("12h");
     await expect(buttons.nth(3)).toHaveText("24h");
+    await expect(buttons.nth(4)).toHaveText("3d");
+    await expect(buttons.nth(5)).toHaveText("7d");
+    await expect(buttons.nth(6)).toHaveText("14d");
   });
 
-  test("24h zoom button is active by default", async ({ page }) => {
+  test("1h zoom button is active by default", async ({ page }) => {
     await page.goto("/");
-    const btn24h = page.locator('.zoom-btn[data-range="24h"]');
-    await expect(btn24h).toHaveClass(/active/);
+    const btn1h = page.locator(
+      '#loss-zoom-controls .zoom-btn[data-range="1h"]',
+    );
+    await expect(btn1h).toHaveClass(/active/);
   });
 
   test("clicking zoom button changes active state", async ({ page }) => {
     await page.goto("/");
-    const btn1h = page.locator('.zoom-btn[data-range="1h"]');
-    const btn24h = page.locator('.zoom-btn[data-range="24h"]');
+    const btn1h = page.locator(
+      '#loss-zoom-controls .zoom-btn[data-range="1h"]',
+    );
+    const btn14d = page.locator(
+      '#loss-zoom-controls .zoom-btn[data-range="14d"]',
+    );
 
-    await btn1h.click();
-    await expect(btn1h).toHaveClass(/active/);
-    await expect(btn24h).not.toHaveClass(/active/);
+    await btn14d.click();
+    await expect(btn14d).toHaveClass(/active/);
+    await expect(btn1h).not.toHaveClass(/active/);
   });
 
   test("loss timeline chart header shows title", async ({ page }) => {
