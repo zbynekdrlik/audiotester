@@ -402,12 +402,11 @@
         },
         minMove: 0.1,
       },
-      autoscaleInfoProvider: function () {
-        return {
-          priceRange: { minValue: null, maxValue: null },
-          margins: { above: 0.1, below: 0.1 },
-        };
-      },
+    });
+
+    // Tight Y-axis margins to avoid zero-start visual artifact
+    latencyLine.priceScale().applyOptions({
+      scaleMargins: { top: 0.1, bottom: 0.1 },
     });
 
     // Tooltip overlay for exact latency values on hover
