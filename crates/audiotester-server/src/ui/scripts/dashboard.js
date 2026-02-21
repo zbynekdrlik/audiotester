@@ -319,10 +319,12 @@
 
         lossUpdating = true;
         lossHistogram.setData(chartData);
-        lossUpdating = false;
         if (lossLiveMode) {
           lossChart.timeScale().scrollToRealTime();
         }
+        setTimeout(function () {
+          lossUpdating = false;
+        }, 0);
 
         // Add "Now" marker at the current time position
         var markerTime =
@@ -532,10 +534,12 @@
 
         latencyUpdating = true;
         latencyLine.setData(chartData);
-        latencyUpdating = false;
         if (latencyLiveMode) {
           latencyChart.timeScale().scrollToRealTime();
         }
+        setTimeout(function () {
+          latencyUpdating = false;
+        }, 0);
 
         // Add "Now" marker on the last data point
         if (chartData.length > 0) {
