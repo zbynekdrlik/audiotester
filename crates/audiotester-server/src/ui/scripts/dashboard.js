@@ -130,7 +130,6 @@
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
   var lossLiveMode = true;
-  var lossUpdating = false;
 
   function initLossTimeline() {
     var container = document.getElementById("loss-timeline");
@@ -233,9 +232,23 @@
       });
     }).observe(container);
 
-    // Detect manual panning to disable live mode
-    lossChart.timeScale().subscribeVisibleLogicalRangeChange(function () {
-      if (!lossUpdating && lossLiveMode) {
+    // Detect user drag/scroll on chart to disable live mode
+    container.addEventListener("mousedown", function () {
+      if (lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("wheel", function () {
+      if (lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("touchstart", function () {
+      if (lossLiveMode) {
         lossLiveMode = false;
         var btn = document.getElementById("loss-live-btn");
         if (btn) btn.classList.remove("active");
@@ -317,14 +330,10 @@
           chartData.push({ time: nowLocal, value: 0, color: "transparent" });
         }
 
-        lossUpdating = true;
         lossHistogram.setData(chartData);
         if (lossLiveMode) {
           lossChart.timeScale().scrollToRealTime();
         }
-        setTimeout(function () {
-          lossUpdating = false;
-        }, 0);
 
         // Add "Now" marker at the current time position
         var markerTime =
@@ -362,7 +371,6 @@
   var latencyTimelineRange = "1h";
   var latencyRefreshTimer = null;
   var latencyLiveMode = true;
-  var latencyUpdating = false;
 
   function initLatencyTimeline() {
     var container = document.getElementById("latency-chart");
@@ -461,9 +469,23 @@
       });
     }).observe(container);
 
-    // Detect manual panning to disable live mode
-    latencyChart.timeScale().subscribeVisibleLogicalRangeChange(function () {
-      if (!latencyUpdating && latencyLiveMode) {
+    // Detect user drag/scroll on chart to disable live mode
+    container.addEventListener("mousedown", function () {
+      if (latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("wheel", function () {
+      if (latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("touchstart", function () {
+      if (latencyLiveMode) {
         latencyLiveMode = false;
         var btn = document.getElementById("latency-live-btn");
         if (btn) btn.classList.remove("active");
@@ -531,14 +553,10 @@
             };
           });
 
-        latencyUpdating = true;
         latencyLine.setData(chartData);
         if (latencyLiveMode) {
           latencyChart.timeScale().scrollToRealTime();
         }
-        setTimeout(function () {
-          latencyUpdating = false;
-        }, 0);
 
         // Add "Now" marker on the last data point
         if (chartData.length > 0) {
