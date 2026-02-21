@@ -100,14 +100,14 @@ test.describe("Latency Timeline UI", () => {
     await expect(buttons.nth(6)).toHaveText("14d");
   });
 
-  test("14d zoom button is active by default on latency timeline", async ({
+  test("1h zoom button is active by default on latency timeline", async ({
     page,
   }) => {
     await page.goto("/");
-    const btn14d = page.locator(
-      '#latency-zoom-controls .zoom-btn[data-range="14d"]',
+    const btn1h = page.locator(
+      '#latency-zoom-controls .zoom-btn[data-range="1h"]',
     );
-    await expect(btn14d).toHaveClass(/active/);
+    await expect(btn1h).toHaveClass(/active/);
   });
 
   test("clicking latency zoom button changes active state", async ({
@@ -121,8 +121,8 @@ test.describe("Latency Timeline UI", () => {
       '#latency-zoom-controls .zoom-btn[data-range="14d"]',
     );
 
-    await btn1h.click();
-    await expect(btn1h).toHaveClass(/active/);
-    await expect(btn14d).not.toHaveClass(/active/);
+    await btn14d.click();
+    await expect(btn14d).toHaveClass(/active/);
+    await expect(btn1h).not.toHaveClass(/active/);
   });
 });

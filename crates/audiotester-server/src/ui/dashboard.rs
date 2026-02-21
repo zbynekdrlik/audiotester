@@ -83,13 +83,13 @@ fn DashboardPage() -> impl IntoView {
                             <div class="chart-header">
                                 <h2>"Sample Loss Timeline"</h2>
                                 <div class="zoom-controls" id="loss-zoom-controls">
-                                    <button class="zoom-btn" data-range="1h">"1h"</button>
+                                    <button class="zoom-btn active" data-range="1h">"1h"</button>
                                     <button class="zoom-btn" data-range="6h">"6h"</button>
                                     <button class="zoom-btn" data-range="12h">"12h"</button>
                                     <button class="zoom-btn" data-range="24h">"24h"</button>
                                     <button class="zoom-btn" data-range="3d">"3d"</button>
                                     <button class="zoom-btn" data-range="7d">"7d"</button>
-                                    <button class="zoom-btn active" data-range="14d">"14d"</button>
+                                    <button class="zoom-btn" data-range="14d">"14d"</button>
                                 </div>
                             </div>
                             <div id="loss-timeline" class="chart" data-testid="loss-timeline"></div>
@@ -98,13 +98,13 @@ fn DashboardPage() -> impl IntoView {
                             <div class="chart-header">
                                 <h2>"Latency Timeline"</h2>
                                 <div class="zoom-controls" id="latency-zoom-controls">
-                                    <button class="zoom-btn" data-range="1h">"1h"</button>
+                                    <button class="zoom-btn active" data-range="1h">"1h"</button>
                                     <button class="zoom-btn" data-range="6h">"6h"</button>
                                     <button class="zoom-btn" data-range="12h">"12h"</button>
                                     <button class="zoom-btn" data-range="24h">"24h"</button>
                                     <button class="zoom-btn" data-range="3d">"3d"</button>
                                     <button class="zoom-btn" data-range="7d">"7d"</button>
-                                    <button class="zoom-btn active" data-range="14d">"14d"</button>
+                                    <button class="zoom-btn" data-range="14d">"14d"</button>
                                 </div>
                             </div>
                             <div id="latency-chart" class="chart" data-testid="latency-timeline"></div>

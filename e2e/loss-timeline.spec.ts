@@ -125,12 +125,12 @@ test.describe("Loss Timeline UI", () => {
     await expect(buttons.nth(6)).toHaveText("14d");
   });
 
-  test("14d zoom button is active by default", async ({ page }) => {
+  test("1h zoom button is active by default", async ({ page }) => {
     await page.goto("/");
-    const btn14d = page.locator(
-      '#loss-zoom-controls .zoom-btn[data-range="14d"]',
+    const btn1h = page.locator(
+      '#loss-zoom-controls .zoom-btn[data-range="1h"]',
     );
-    await expect(btn14d).toHaveClass(/active/);
+    await expect(btn1h).toHaveClass(/active/);
   });
 
   test("clicking zoom button changes active state", async ({ page }) => {
@@ -142,9 +142,9 @@ test.describe("Loss Timeline UI", () => {
       '#loss-zoom-controls .zoom-btn[data-range="14d"]',
     );
 
-    await btn1h.click();
-    await expect(btn1h).toHaveClass(/active/);
-    await expect(btn14d).not.toHaveClass(/active/);
+    await btn14d.click();
+    await expect(btn14d).toHaveClass(/active/);
+    await expect(btn1h).not.toHaveClass(/active/);
   });
 
   test("loss timeline chart header shows title", async ({ page }) => {

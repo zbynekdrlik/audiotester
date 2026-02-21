@@ -36,7 +36,7 @@
     if (!stats) return;
 
     if (els.latency) {
-      els.latency.textContent = stats.current_latency.toFixed(2);
+      els.latency.textContent = stats.current_latency.toFixed(1);
       els.latency.className =
         "metric-value" +
         (stats.current_latency < 10
@@ -126,7 +126,7 @@
   var lossChart = null;
   var lossHistogram = null;
   var lossMarkers = null;
-  var lossTimelineRange = "14d";
+  var lossTimelineRange = "1h";
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
 
@@ -329,7 +329,7 @@
   var latencyChart = null;
   var latencyLine = null;
   var latencyMarkers = null;
-  var latencyTimelineRange = "14d";
+  var latencyTimelineRange = "1h";
   var latencyRefreshTimer = null;
 
   function initLatencyTimeline() {
@@ -366,9 +366,9 @@
       priceFormat: {
         type: "custom",
         formatter: function (price) {
-          return price.toFixed(2) + " ms";
+          return price.toFixed(1) + " ms";
         },
-        minMove: 0.01,
+        minMove: 0.1,
       },
     });
 
@@ -403,7 +403,7 @@
 
       toolTip.innerHTML =
         '<div class="latency-tooltip-value">' +
-        data.value.toFixed(2) +
+        data.value.toFixed(1) +
         " ms</div>" +
         '<div class="latency-tooltip-time">' +
         timeStr +
@@ -467,7 +467,10 @@
             return b.avg > 0;
           })
           .map(function (b) {
-            return { time: timeToLocal(b.t), value: b.avg };
+            return {
+              time: timeToLocal(b.t),
+              value: Math.round(b.avg * 10) / 10,
+            };
           });
 
         latencyLine.setData(chartData);
