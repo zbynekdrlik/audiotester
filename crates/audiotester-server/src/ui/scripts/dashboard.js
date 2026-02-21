@@ -87,22 +87,29 @@
     if (samplesReceivedEl && stats.samples_received !== undefined) {
       samplesReceivedEl.textContent = formatSampleCount(stats.samples_received);
     }
-    // Update throughput rates (delta/dt calculation)
+    // Update throughput rates (delta/dt over >= 1s window)
+    // Sample counters update once per second in the monitoring loop,
+    // so we only recalculate when the values actually change.
     var now = Date.now();
     if (prevSampleTime !== null && prevSamplesSent !== null) {
+      var sentChanged = stats.samples_sent !== prevSamplesSent;
       var dt = (now - prevSampleTime) / 1000;
-      if (dt > 0.05) {
+      if (sentChanged && dt >= 0.5) {
         var txRate = Math.round((stats.samples_sent - prevSamplesSent) / dt);
         var rxRate = Math.round(
           (stats.samples_received - prevSamplesReceived) / dt,
         );
         if (txRateEl) txRateEl.textContent = formatRate(txRate);
         if (rxRateEl) rxRateEl.textContent = formatRate(rxRate);
+        prevSamplesSent = stats.samples_sent;
+        prevSamplesReceived = stats.samples_received;
+        prevSampleTime = now;
       }
+    } else {
+      prevSamplesSent = stats.samples_sent;
+      prevSamplesReceived = stats.samples_received;
+      prevSampleTime = now;
     }
-    prevSamplesSent = stats.samples_sent;
-    prevSamplesReceived = stats.samples_received;
-    prevSampleTime = now;
     // Update signal status
     if (signalStatusEl) {
       if (stats.signal_lost) {
