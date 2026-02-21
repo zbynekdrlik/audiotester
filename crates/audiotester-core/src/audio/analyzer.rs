@@ -262,7 +262,7 @@ impl Analyzer {
         for &sample in counter_samples {
             // Decode counter from normalized audio (0.0-1.0 → 0-65535)
             let normalized = sample.clamp(0.0, 1.0);
-            let received_counter = (normalized * 65536.0) as u32 & 0xFFFF;
+            let received_counter = (normalized * 65536.0).round() as u32 & 0xFFFF;
 
             // Silence detection: check if counter is incrementing by exactly 1
             if let Some(last) = self.last_counter {
@@ -456,6 +456,42 @@ mod tests {
             "Should handle wrap-around correctly"
         );
         assert!(!result.counter_silent);
+    }
+
+    #[test]
+    fn test_counter_65535_round_trip_precision() {
+        // Verify that counter value 65535 survives encode/decode round-trip.
+        // Encode: counter / 65536.0, Decode: (sample * 65536.0).round() as u32 & 0xFFFF
+        // Without .round(), 65535/65536*65536 = 65534.999... truncates to 65534 (BUG).
+        for counter in [0u32, 1, 32767, 32768, 65534, 65535] {
+            let encoded = counter as f32 / 65536.0;
+            let decoded = (encoded * 65536.0).round() as u32 & 0xFFFF;
+            assert_eq!(
+                decoded, counter,
+                "Counter {counter} failed round-trip: encoded={encoded}, decoded={decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_full_wrap_cycle_no_false_loss() {
+        let mut analyzer = Analyzer::new(&[], 96000);
+
+        // Full cycle: 0 through 65535 then back to 0..9
+        // This must report exactly 0 losses.
+        let mut samples = Vec::new();
+        for i in 0..65536u32 {
+            samples.push(i as f32 / 65536.0);
+        }
+        for i in 0..10u32 {
+            samples.push(i as f32 / 65536.0);
+        }
+
+        let result = analyzer.detect_frame_loss(&samples);
+        assert_eq!(
+            result.confirmed_lost, 0,
+            "Full 0-65535-0 wrap must have zero false losses"
+        );
     }
 
     #[test]

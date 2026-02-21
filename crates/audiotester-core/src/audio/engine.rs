@@ -615,7 +615,7 @@ impl AudioEngine {
                         if frame.len() > 1 {
                             let _ = counter_producer.try_push(frame[1]);
                             // Record received counter for loss verification
-                            let raw_counter = ((frame[1] * 65536.0) as u32) & 0xFFFF;
+                            let raw_counter = ((frame[1] * 65536.0).round() as u32) & 0xFFFF;
                             let _ = rec_recv_producer.try_push(RecordEntry {
                                 counter: raw_counter as u16,
                                 frame_index: current_shared_frame + i as u64,
