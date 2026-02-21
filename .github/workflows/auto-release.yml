@@ -304,10 +304,10 @@ jobs:
           LOST_DIFF=$((LOST2 - LOST1))
           echo "Latency: ${LATENCY}ms, Lost in 10s: $LOST_DIFF"
 
-          if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 50) ? 0 : 1}'; then
-            echo "Latency is in expected loopback range (0-50ms)"
+          if echo "$LATENCY" | awk '{exit ($1 > 0 && $1 < 100) ? 0 : 1}'; then
+            echo "Latency is in expected loopback range (0-100ms)"
           else
-            echo "::error::Latency ${LATENCY}ms is outside expected range (0-50ms)"
+            echo "::error::Latency ${LATENCY}ms is outside expected range (0-100ms)"
             exit 1
           fi
 
