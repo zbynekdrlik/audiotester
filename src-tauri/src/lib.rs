@@ -324,13 +324,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     last_device_name = engine_status.device_name;
                 }
             }
+        }
 
-            // Update sample counters from engine (cumulative values)
-            if let Ok((sent, received)) = engine.get_sample_counts().await {
-                if let Ok(mut store) = stats.lock() {
-                    store.set_samples_sent(sent as u64);
-                    store.set_samples_received(received as u64);
-                }
+        // Update sample counters from engine every cycle (100ms) for smooth display
+        if let Ok((sent, received)) = engine.get_sample_counts().await {
+            if let Ok(mut store) = stats.lock() {
+                store.set_samples_sent(sent as u64);
+                store.set_samples_received(received as u64);
             }
         }
 

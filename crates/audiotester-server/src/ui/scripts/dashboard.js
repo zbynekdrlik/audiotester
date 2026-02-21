@@ -134,6 +134,7 @@
 
   // Format throughput rate as "96.0K S/s | 750.0 KB/s"
   function formatRate(samplesPerSec) {
+    if (samplesPerSec <= 0) return "--";
     var sps;
     if (samplesPerSec >= 1000000) sps = (samplesPerSec / 1000).toFixed(0) + "K";
     else if (samplesPerSec >= 1000)
@@ -145,9 +146,7 @@
     var bps;
     if (bytesPerSec >= 1048576)
       bps = (bytesPerSec / 1048576).toFixed(1) + " MB/s";
-    else if (bytesPerSec >= 1024)
-      bps = (bytesPerSec / 1024).toFixed(1) + " KB/s";
-    else bps = bytesPerSec + " B/s";
+    else bps = (bytesPerSec / 1024).toFixed(1) + " KB/s";
 
     return sps + " S/s | " + bps;
   }
