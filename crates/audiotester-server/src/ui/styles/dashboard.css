@@ -282,6 +282,10 @@ main {
   border-color: rgba(0, 212, 255, 0.3);
 }
 
+.zoom-btn.live {
+  margin-left: 0.5rem;
+}
+
 .chart {
   width: 100%;
   flex: 1;

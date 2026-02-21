@@ -153,4 +153,34 @@ test.describe("Loss Timeline UI", () => {
     const header = page.locator(".chart-header");
     await expect(header.first()).toBeVisible();
   });
+
+  test("Live button is visible on loss timeline", async ({ page }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#loss-live-btn");
+    await expect(liveBtn).toBeVisible();
+    await expect(liveBtn).toHaveText("Live");
+  });
+
+  test("Live button is active by default on loss timeline", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#loss-live-btn");
+    await expect(liveBtn).toHaveClass(/active/);
+  });
+
+  test("clicking Live button adds active class on loss timeline", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#loss-live-btn");
+
+    // Remove active class first by simulating what pan detection would do
+    await liveBtn.evaluate((el) => el.classList.remove("active"));
+    await expect(liveBtn).not.toHaveClass(/active/);
+
+    // Click should re-activate
+    await liveBtn.click();
+    await expect(liveBtn).toHaveClass(/active/);
+  });
 });

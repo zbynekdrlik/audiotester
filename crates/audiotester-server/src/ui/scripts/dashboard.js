@@ -129,6 +129,7 @@
   var lossTimelineRange = "1h";
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
+  var lossLiveMode = true;
 
   function initLossTimeline() {
     var container = document.getElementById("loss-timeline");
@@ -231,6 +232,41 @@
       });
     }).observe(container);
 
+    // Detect user drag/scroll on chart to disable live mode
+    container.addEventListener("mousedown", function () {
+      if (lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("wheel", function () {
+      if (lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("touchstart", function () {
+      if (lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+
+    // Live button handler
+    var lossLiveBtn = document.getElementById("loss-live-btn");
+    if (lossLiveBtn) {
+      lossLiveBtn.addEventListener("click", function () {
+        lossLiveMode = true;
+        lossLiveBtn.classList.add("active");
+        if (lossChart) {
+          lossChart.timeScale().scrollToRealTime();
+        }
+      });
+    }
+
     // Setup zoom button handlers
     var zoomControls = document.getElementById("loss-zoom-controls");
     if (zoomControls) {
@@ -295,6 +331,9 @@
         }
 
         lossHistogram.setData(chartData);
+        if (lossLiveMode) {
+          lossChart.timeScale().scrollToRealTime();
+        }
 
         // Add "Now" marker at the current time position
         var markerTime =
@@ -331,6 +370,7 @@
   var latencyMarkers = null;
   var latencyTimelineRange = "1h";
   var latencyRefreshTimer = null;
+  var latencyLiveMode = true;
 
   function initLatencyTimeline() {
     var container = document.getElementById("latency-chart");
@@ -370,6 +410,11 @@
         },
         minMove: 0.1,
       },
+    });
+
+    // Tight Y-axis margins to avoid zero-start visual artifact
+    latencyLine.priceScale().applyOptions({
+      scaleMargins: { top: 0.1, bottom: 0.1 },
     });
 
     // Tooltip overlay for exact latency values on hover
@@ -424,6 +469,41 @@
       });
     }).observe(container);
 
+    // Detect user drag/scroll on chart to disable live mode
+    container.addEventListener("mousedown", function () {
+      if (latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("wheel", function () {
+      if (latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+    container.addEventListener("touchstart", function () {
+      if (latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+
+    // Live button handler
+    var latencyLiveBtn = document.getElementById("latency-live-btn");
+    if (latencyLiveBtn) {
+      latencyLiveBtn.addEventListener("click", function () {
+        latencyLiveMode = true;
+        latencyLiveBtn.classList.add("active");
+        if (latencyChart) {
+          latencyChart.timeScale().scrollToRealTime();
+        }
+      });
+    }
+
     // Setup zoom button handlers
     var zoomControls = document.getElementById("latency-zoom-controls");
     if (zoomControls) {
@@ -474,6 +554,9 @@
           });
 
         latencyLine.setData(chartData);
+        if (latencyLiveMode) {
+          latencyChart.timeScale().scrollToRealTime();
+        }
 
         // Add "Now" marker on the last data point
         if (chartData.length > 0) {
