@@ -7,7 +7,9 @@ pub mod api;
 pub mod ui;
 pub mod ws;
 
-use audiotester_core::audio::engine::{AnalysisResult, AudioEngine, DeviceInfo, EngineState};
+use audiotester_core::audio::engine::{
+    AnalysisResult, AudioEngine, DeviceInfo, EngineState, RecordEntry,
+};
 use audiotester_core::stats::store::StatsStore;
 use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
@@ -48,6 +50,14 @@ pub enum EngineCommand {
     },
     IsStreamInvalidated {
         reply: oneshot::Sender<bool>,
+    },
+    TakeRecordingConsumers {
+        reply: oneshot::Sender<
+            Option<(
+                ringbuf::HeapCons<RecordEntry>,
+                ringbuf::HeapCons<RecordEntry>,
+            )>,
+        >,
     },
 }
 
@@ -105,6 +115,9 @@ impl EngineHandle {
                     }
                     EngineCommand::IsStreamInvalidated { reply } => {
                         let _ = reply.send(engine.is_stream_invalidated());
+                    }
+                    EngineCommand::TakeRecordingConsumers { reply } => {
+                        let _ = reply.send(engine.take_recording_consumers());
                     }
                 }
             }
@@ -187,6 +200,26 @@ impl EngineHandle {
         rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
     }
 
+    /// Take recording consumers for sample recording (loss verification).
+    ///
+    /// Returns the sent and received recording ring buffer consumers.
+    /// Can only be called once after engine start — subsequent calls return None.
+    pub async fn take_recording_consumers(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            ringbuf::HeapCons<RecordEntry>,
+            ringbuf::HeapCons<RecordEntry>,
+        )>,
+    > {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::TakeRecordingConsumers { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
     /// Check if the ASIO driver sent a stream invalidation (kAsioResetRequest).
     ///
     /// Returns true when the driver has reset and streams need to be rebuilt.
@@ -260,6 +293,11 @@ async fn serve_manifest() -> impl IntoResponse {
     )
 }
 
+/// Serve the favicon.ico for browser tab identification
+async fn serve_favicon() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/x-icon")], ui::FAVICON_ICO)
+}
+
 /// Build the Axum router with all routes
 pub fn build_router(state: AppState) -> Router {
     Router::new()
@@ -297,6 +335,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
         // PWA manifest
         .route("/manifest.json", axum::routing::get(serve_manifest))
+        // Favicon
+        .route("/favicon.ico", axum::routing::get(serve_favicon))
         // Static assets (CSS, JS)
         .nest_service("/assets", ServeDir::new("assets"))
         .layer(CorsLayer::permissive())

@@ -5,6 +5,7 @@
 
 pub mod tray;
 
+use audiotester_core::audio::recorder::{RecorderHandle, SampleRecorder};
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -269,6 +270,12 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     // Counter silence tracking: ch1 muted loopback estimated loss.
     let mut counter_silent_since: Option<std::time::Instant> = None;
     let mut cached_sample_rate: u32 = audiotester_core::DEFAULT_SAMPLE_RATE;
+    // Sample recorder for loss verification (always-on when engine running)
+    let mut recorder_handle: Option<RecorderHandle> = None;
+    let recordings_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("audiotester")
+        .join("recordings");
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
     if APP_HANDLE.get().is_none() {
@@ -342,6 +349,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // When detected, do a full engine restart for clean measurement state.
         if let Ok(true) = engine.is_stream_invalidated().await {
             tracing::warn!("ASIO stream invalidated (driver reset detected), restarting engine");
+
+            // Stop recorder before engine restart
+            if let Some(mut rh) = recorder_handle.take() {
+                rh.stop();
+            }
 
             // Full engine restart: stop → re-select device → start
             if let Err(e) = engine.stop().await {
@@ -424,6 +436,17 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         confidence = %format!("{:.3}", result.confidence),
                         "signal_lost"
                     );
+                }
+
+                // Start sample recorder if not already running
+                if recorder_handle.is_none() {
+                    if let Ok(Some((sent_cons, recv_cons))) =
+                        engine.take_recording_consumers().await
+                    {
+                        let recorder = SampleRecorder::new(recordings_dir.clone());
+                        recorder_handle = Some(recorder.start(sent_cons, recv_cons));
+                        tracing::info!(dir = %recordings_dir.display(), "Sample recorder started");
+                    }
                 }
 
                 // Reset failure counter on successful analysis
@@ -554,6 +577,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         "Audio engine error, attempting reconnection"
                     );
 
+                    // Stop recorder before engine reconnect
+                    if let Some(mut rh) = recorder_handle.take() {
+                        rh.stop();
+                    }
+
                     // Update tray to disconnected
                     if last_status != tray::TrayStatus::Disconnected {
                         last_status = tray::TrayStatus::Disconnected;
@@ -626,6 +654,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             if let Some(lost_since) = signal_lost_since {
                 if lost_since.elapsed() > Duration::from_secs(10) {
                     tracing::warn!("Signal lost for >10s, attempting ASIO reconnection");
+
+                    // Stop recorder before engine reconnect
+                    if let Some(mut rh) = recorder_handle.take() {
+                        rh.stop();
+                    }
 
                     if last_status != tray::TrayStatus::Disconnected {
                         last_status = tray::TrayStatus::Disconnected;

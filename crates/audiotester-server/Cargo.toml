@@ -30,6 +30,9 @@ serde_json = "1.0"
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
+# Lock-free ring buffer (for recording consumer types)
+ringbuf = "0.4"
+
 # Error handling
 anyhow = "1.0"
 thiserror = "2.0"

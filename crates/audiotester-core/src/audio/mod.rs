@@ -13,4 +13,5 @@ pub mod burst;
 pub mod detector;
 pub mod engine;
 pub mod latency;
+pub mod recorder;
 pub mod signal;

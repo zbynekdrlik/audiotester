@@ -358,6 +358,7 @@ dependencies = [
  "local-ip-address",
  "reactive_graph",
  "reqwest 0.12.28",
+ "ringbuf",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

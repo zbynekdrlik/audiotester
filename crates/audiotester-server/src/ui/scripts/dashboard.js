@@ -18,8 +18,15 @@
   const samplesSentEl = document.getElementById("samples-sent");
   const samplesReceivedEl = document.getElementById("samples-received");
   const signalStatusEl = document.getElementById("signal-status");
+  const txRateEl = document.getElementById("tx-rate");
+  const rxRateEl = document.getElementById("rx-rate");
   const remoteUrlEl = document.getElementById("remote-url");
   const resetBtn = document.getElementById("reset-btn");
+
+  // Throughput rate tracking state
+  var prevSamplesSent = null;
+  var prevSamplesReceived = null;
+  var prevSampleTime = null;
 
   // Format uptime seconds into human-readable string
   function formatUptime(seconds) {
@@ -80,6 +87,22 @@
     if (samplesReceivedEl && stats.samples_received !== undefined) {
       samplesReceivedEl.textContent = formatSampleCount(stats.samples_received);
     }
+    // Update throughput rates (delta/dt calculation)
+    var now = Date.now();
+    if (prevSampleTime !== null && prevSamplesSent !== null) {
+      var dt = (now - prevSampleTime) / 1000;
+      if (dt > 0.05) {
+        var txRate = Math.round((stats.samples_sent - prevSamplesSent) / dt);
+        var rxRate = Math.round(
+          (stats.samples_received - prevSamplesReceived) / dt,
+        );
+        if (txRateEl) txRateEl.textContent = formatRate(txRate);
+        if (rxRateEl) rxRateEl.textContent = formatRate(rxRate);
+      }
+    }
+    prevSamplesSent = stats.samples_sent;
+    prevSamplesReceived = stats.samples_received;
+    prevSampleTime = now;
     // Update signal status
     if (signalStatusEl) {
       if (stats.signal_lost) {
@@ -94,12 +117,32 @@
     }
   }
 
-  // Format large sample counts (e.g., 1.2M, 450K)
+  // Format large sample counts (e.g., 1.23M, 450.12K)
   function formatSampleCount(count) {
-    if (count >= 1000000000) return (count / 1000000000).toFixed(1) + "G";
-    if (count >= 1000000) return (count / 1000000).toFixed(1) + "M";
-    if (count >= 1000) return (count / 1000).toFixed(1) + "K";
+    if (count >= 1000000000) return (count / 1000000000).toFixed(2) + "G";
+    if (count >= 1000000) return (count / 1000000).toFixed(2) + "M";
+    if (count >= 1000) return (count / 1000).toFixed(2) + "K";
     return count.toString();
+  }
+
+  // Format throughput rate as "96.0K S/s | 750.0 KB/s"
+  function formatRate(samplesPerSec) {
+    var sps;
+    if (samplesPerSec >= 1000000) sps = (samplesPerSec / 1000).toFixed(0) + "K";
+    else if (samplesPerSec >= 1000)
+      sps = (samplesPerSec / 1000).toFixed(1) + "K";
+    else sps = samplesPerSec.toString();
+
+    // Bytes/sec: 2 channels * 4 bytes/sample * samples/sec
+    var bytesPerSec = samplesPerSec * 2 * 4;
+    var bps;
+    if (bytesPerSec >= 1048576)
+      bps = (bytesPerSec / 1048576).toFixed(1) + " MB/s";
+    else if (bytesPerSec >= 1024)
+      bps = (bytesPerSec / 1024).toFixed(1) + " KB/s";
+    else bps = bytesPerSec + " B/s";
+
+    return sps + " S/s | " + bps;
   }
 
   // ─── Shared: UTC to local timestamp conversion ─────────────────────
@@ -608,6 +651,7 @@
 
   let ws = null;
   let reconnectTimer = null;
+  var lastMessageTime = 0;
 
   function connect() {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -623,6 +667,7 @@
     };
 
     ws.onmessage = function (event) {
+      lastMessageTime = Date.now();
       try {
         const stats = JSON.parse(event.data);
         updateSummary(stats);
@@ -705,6 +750,19 @@
         console.error("Failed to load version info:", err);
       });
   }
+
+  // WebSocket heartbeat: detect stale connections (no message for 5s)
+  setInterval(function () {
+    if (ws && ws.readyState === WebSocket.OPEN && lastMessageTime > 0) {
+      var age = Math.floor((Date.now() - lastMessageTime) / 1000);
+      if (age >= 5) {
+        statusEl.textContent = "Stale (" + age + "s ago)";
+        statusEl.className = "status-indicator";
+        // Force reconnect
+        ws.close();
+      }
+    }
+  }, 1000);
 
   loadVersionInfo();
   loadRemoteUrl();

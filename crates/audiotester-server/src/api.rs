@@ -401,7 +401,7 @@ pub async fn toggle_monitoring(
 /// Query parameters for GET /api/v1/loss-timeline
 #[derive(Deserialize)]
 pub struct LossTimelineQuery {
-    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
+    /// Time range: "10m", "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
     pub range: Option<String>,
     /// Bucket size in seconds (default: auto based on range)
     pub bucket_size: Option<i64>,
@@ -438,6 +438,7 @@ pub async fn get_loss_timeline(
     let range_str = query.range.as_deref().unwrap_or("14d");
 
     let range_secs: i64 = match range_str {
+        "10m" => 600,
         "1h" => 3600,
         "6h" => 21600,
         "12h" => 43200,
@@ -451,6 +452,7 @@ pub async fn get_loss_timeline(
     let bucket_size = query
         .bucket_size
         .unwrap_or(match range_str {
+            "10m" => 10,
             "1h" => 10,
             "6h" => 60,
             "12h" => 120,
@@ -480,7 +482,7 @@ pub async fn get_loss_timeline(
 /// Query parameters for GET /api/v1/latency-timeline
 #[derive(Deserialize)]
 pub struct LatencyTimelineQuery {
-    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
+    /// Time range: "10m", "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
     pub range: Option<String>,
     /// Bucket size in seconds (default: auto based on range)
     pub bucket_size: Option<i64>,
@@ -519,6 +521,7 @@ pub async fn get_latency_timeline(
     let range_str = query.range.as_deref().unwrap_or("14d");
 
     let range_secs: i64 = match range_str {
+        "10m" => 600,
         "1h" => 3600,
         "6h" => 21600,
         "12h" => 43200,
@@ -531,6 +534,7 @@ pub async fn get_latency_timeline(
     let bucket_size = query
         .bucket_size
         .unwrap_or(match range_str {
+            "10m" => 10,
             "1h" => 10,
             "6h" => 60,
             "12h" => 120,

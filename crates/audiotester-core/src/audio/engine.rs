@@ -34,6 +34,18 @@ use crossbeam_channel;
 /// Ring buffer size in samples (enough for ~0.5 second at 96kHz)
 const RING_BUFFER_SIZE: usize = 65536;
 
+/// Recording ring buffer size (2 seconds at 96kHz)
+const RECORDING_RING_SIZE: usize = 192000;
+
+/// A single recorded sample entry for loss verification
+#[derive(Clone, Copy, Debug)]
+pub struct RecordEntry {
+    /// The 16-bit counter value (0-65535)
+    pub counter: u16,
+    /// Monotonic frame index from shared_frame_counter
+    pub frame_index: u64,
+}
+
 /// Errors that can occur during audio engine operations
 #[derive(Error, Debug)]
 pub enum AudioEngineError {
@@ -181,6 +193,10 @@ pub struct AudioEngine {
     stream_invalidated: Option<Arc<AtomicBool>>,
     /// Pre-allocated buffer for counter sample reads
     counter_buffer: Vec<f32>,
+    /// Consumer for sent sample recording (loss verification)
+    rec_sent_consumer: Option<ringbuf::HeapCons<RecordEntry>>,
+    /// Consumer for received sample recording (loss verification)
+    rec_recv_consumer: Option<ringbuf::HeapCons<RecordEntry>>,
 }
 
 impl AudioEngine {
@@ -205,6 +221,8 @@ impl AudioEngine {
             buffer_size_frames: None,
             stream_invalidated: None,
             counter_buffer: Vec::new(),
+            rec_sent_consumer: None,
+            rec_recv_consumer: None,
         }
     }
 
@@ -447,6 +465,12 @@ impl AudioEngine {
         let counter_ring = HeapRb::<f32>::new(RING_BUFFER_SIZE);
         let (mut counter_producer, counter_consumer) = counter_ring.split();
 
+        // Recording ring buffers for loss verification (always-on)
+        let rec_sent_ring = HeapRb::<RecordEntry>::new(RECORDING_RING_SIZE);
+        let (mut rec_sent_producer, rec_sent_consumer) = rec_sent_ring.split();
+        let rec_recv_ring = HeapRb::<RecordEntry>::new(RECORDING_RING_SIZE);
+        let (mut rec_recv_producer, rec_recv_consumer) = rec_recv_ring.split();
+
         // Lock-free crossbeam channels for burst/detection events
         let (burst_event_tx, burst_event_rx) = crossbeam_channel::bounded::<BurstEvent>(32);
         let (detection_event_tx, detection_event_rx) =
@@ -510,6 +534,11 @@ impl AudioEngine {
                         if frame.len() > 1 {
                             let counter = (start_counter + i as u64) & 0xFFFF;
                             frame[1] = (counter as f32) / 65536.0;
+                            // Record sent counter for loss verification
+                            let _ = rec_sent_producer.try_push(RecordEntry {
+                                counter: counter as u16,
+                                frame_index: start_counter + i as u64,
+                            });
                         }
 
                         // Fill remaining channels with silence
@@ -585,6 +614,12 @@ impl AudioEngine {
                         // Counter ring buffer for loss detection (producer owned, no Mutex)
                         if frame.len() > 1 {
                             let _ = counter_producer.try_push(frame[1]);
+                            // Record received counter for loss verification
+                            let raw_counter = ((frame[1] * 65536.0) as u32) & 0xFFFF;
+                            let _ = rec_recv_producer.try_push(RecordEntry {
+                                counter: raw_counter as u16,
+                                frame_index: current_shared_frame + i as u64,
+                            });
                         }
                     }
 
@@ -641,6 +676,8 @@ impl AudioEngine {
         self.shared_frame_counter = Some(shared_frame_counter);
         self.buffer_size_frames = Some(buffer_size_frames);
         self.stream_invalidated = Some(stream_invalidated);
+        self.rec_sent_consumer = Some(rec_sent_consumer);
+        self.rec_recv_consumer = Some(rec_recv_consumer);
         self.counter_buffer = vec![0.0f32; RING_BUFFER_SIZE / 2];
         self.state = EngineState::Running;
         self.sample_rate = effective_rate;
@@ -672,6 +709,8 @@ impl AudioEngine {
         self.shared_frame_counter = None;
         self.buffer_size_frames = None;
         self.stream_invalidated = None;
+        self.rec_sent_consumer = None;
+        self.rec_recv_consumer = None;
         self.counter_buffer = Vec::new();
 
         // Release ASIO host and device references so the driver can be
@@ -819,6 +858,21 @@ impl AudioEngine {
             .as_ref()
             .map(|f| f.load(Ordering::Acquire))
             .unwrap_or(false)
+    }
+
+    /// Take recording consumers for the sample recorder thread.
+    ///
+    /// Returns `(sent_consumer, recv_consumer)` for loss verification recording.
+    /// Can only be called once after `start()` — subsequent calls return `None`.
+    pub fn take_recording_consumers(
+        &mut self,
+    ) -> Option<(
+        ringbuf::HeapCons<RecordEntry>,
+        ringbuf::HeapCons<RecordEntry>,
+    )> {
+        let sent = self.rec_sent_consumer.take()?;
+        let recv = self.rec_recv_consumer.take()?;
+        Some((sent, recv))
     }
 
     /// Get latency measurement update rate in Hz

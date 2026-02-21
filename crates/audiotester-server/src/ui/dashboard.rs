@@ -29,6 +29,7 @@ fn DashboardPage() -> impl IntoView {
                 <meta name="theme-color" content="#1a1a2e"/>
                 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"/>
                 <link rel="manifest" href="/manifest.json"/>
+                <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
                 <title>"Audiotester - Dashboard"</title>
                 <style>{DASHBOARD_STYLES}</style>
             </head>
@@ -71,6 +72,14 @@ fn DashboardPage() -> impl IntoView {
                             <span class="info-label">"IN:"</span>
                             <span class="info-value" id="samples-received">"0"</span>
                         </div>
+                        <div class="info-item">
+                            <span class="info-label">"TX:"</span>
+                            <span class="info-value" id="tx-rate">"--"</span>
+                        </div>
+                        <div class="info-item">
+                            <span class="info-label">"RX:"</span>
+                            <span class="info-value" id="rx-rate">"--"</span>
+                        </div>
                         <span
                             class="signal-status"
                             id="signal-status"
@@ -83,6 +92,7 @@ fn DashboardPage() -> impl IntoView {
                             <div class="chart-header">
                                 <h2>"Sample Loss Timeline"</h2>
                                 <div class="zoom-controls" id="loss-zoom-controls">
+                                    <button class="zoom-btn" data-range="10m">"10m"</button>
                                     <button class="zoom-btn active" data-range="1h">"1h"</button>
                                     <button class="zoom-btn" data-range="6h">"6h"</button>
                                     <button class="zoom-btn" data-range="12h">"12h"</button>
@@ -99,6 +109,7 @@ fn DashboardPage() -> impl IntoView {
                             <div class="chart-header">
                                 <h2>"Latency Timeline"</h2>
                                 <div class="zoom-controls" id="latency-zoom-controls">
+                                    <button class="zoom-btn" data-range="10m">"10m"</button>
                                     <button class="zoom-btn active" data-range="1h">"1h"</button>
                                     <button class="zoom-btn" data-range="6h">"6h"</button>
                                     <button class="zoom-btn" data-range="12h">"12h"</button>

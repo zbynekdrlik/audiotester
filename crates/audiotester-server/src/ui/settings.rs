@@ -18,6 +18,7 @@ fn SettingsPage() -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
                 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"/>
+                <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
                 <title>"Audiotester - Settings"</title>
                 <style>{SETTINGS_STYLES}</style>
             </head>
