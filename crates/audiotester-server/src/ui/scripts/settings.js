@@ -8,8 +8,40 @@
   const stopBtn = document.getElementById("stop-btn");
   const statusDisplay = document.getElementById("monitoring-status");
   const deviceInfo = document.getElementById("device-info");
+  const signalChannel = document.getElementById("signal-channel");
+  const counterChannel = document.getElementById("counter-channel");
+  const channelError = document.getElementById("channel-error");
 
   let devices = [];
+
+  // Populate channel dropdowns with 1..maxChannels
+  function populateChannelDropdowns(maxChannels, currentPair) {
+    signalChannel.innerHTML = "";
+    counterChannel.innerHTML = "";
+    for (var i = 1; i <= maxChannels; i++) {
+      var opt1 = document.createElement("option");
+      opt1.value = String(i);
+      opt1.textContent = String(i);
+      if (i === currentPair[0]) opt1.selected = true;
+      signalChannel.appendChild(opt1);
+
+      var opt2 = document.createElement("option");
+      opt2.value = String(i);
+      opt2.textContent = String(i);
+      if (i === currentPair[1]) opt2.selected = true;
+      counterChannel.appendChild(opt2);
+    }
+  }
+
+  // Get max channel count from currently selected device
+  function getSelectedDeviceChannels() {
+    var name = deviceSelect.value;
+    var device = devices.find(function (d) {
+      return d.name === name;
+    });
+    if (!device) return 2;
+    return Math.max(device.output_channels, device.input_channels, 2);
+  }
 
   // Fetch device list
   async function loadDevices() {
@@ -52,6 +84,11 @@
         deviceSelect.value = config.device;
       }
       sampleRate.value = config.sample_rate.toString();
+
+      // Populate channel dropdowns based on selected device
+      var maxCh = getSelectedDeviceChannels();
+      var pair = config.channel_pair || [1, 2];
+      populateChannelDropdowns(maxCh, pair);
 
       updateMonitoringUI(config.monitoring);
     } catch (e) {
@@ -112,6 +149,16 @@
     });
     showDeviceInfo(device);
 
+    // Re-populate channel dropdowns for new device
+    var maxCh = getSelectedDeviceChannels();
+    var curSig = parseInt(signalChannel.value) || 1;
+    var curCnt = parseInt(counterChannel.value) || 2;
+    // Clamp to new device range
+    if (curSig > maxCh) curSig = 1;
+    if (curCnt > maxCh) curCnt = 2;
+    if (curSig === curCnt) curCnt = curSig === 1 ? 2 : 1;
+    populateChannelDropdowns(maxCh, [curSig, curCnt]);
+
     try {
       const resp = await fetch("/api/v1/config", {
         method: "PATCH",
@@ -141,6 +188,39 @@
       loadConfig();
     }
   });
+
+  // Channel pair change handler
+  async function onChannelPairChange() {
+    var sig = parseInt(signalChannel.value);
+    var cnt = parseInt(counterChannel.value);
+
+    if (sig === cnt) {
+      channelError.textContent =
+        "Signal and counter must be different channels.";
+      channelError.style.display = "block";
+      return;
+    }
+    channelError.style.display = "none";
+
+    try {
+      var resp = await fetch("/api/v1/config", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ channel_pair: [sig, cnt] }),
+      });
+      if (!resp.ok) {
+        var errText = await resp.text();
+        channelError.textContent = "Failed: " + errText;
+        channelError.style.display = "block";
+      }
+    } catch (e) {
+      channelError.textContent = "Failed: " + e.message;
+      channelError.style.display = "block";
+    }
+  }
+
+  signalChannel.addEventListener("change", onChannelPairChange);
+  counterChannel.addEventListener("change", onChannelPairChange);
 
   function showError(message) {
     var existing = document.querySelector(".error-notification");

@@ -52,6 +52,25 @@ fn SettingsPage() -> impl IntoView {
                         </div>
                     </section>
                     <section class="settings-section">
+                        <h2>"Channel Pair"</h2>
+                        <p class="channel-pair-description">"Select which channels carry the test signal and frame counter (1-based)."</p>
+                        <div class="channel-pair-row">
+                            <div class="form-group">
+                                <label for="signal-channel">"Signal Channel"</label>
+                                <select id="signal-channel" class="channel-select" aria-label="Signal Channel">
+                                    <option value="1">"1"</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="counter-channel">"Counter Channel"</label>
+                                <select id="counter-channel" class="channel-select" aria-label="Counter Channel">
+                                    <option value="2">"2"</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="channel-error" class="channel-error" style="display:none"></div>
+                    </section>
+                    <section class="settings-section">
                         <h2>"Monitoring"</h2>
                         <div class="monitoring-controls">
                             <div class="status-display" id="monitoring-status">"Stopped"</div>

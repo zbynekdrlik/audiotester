@@ -41,7 +41,7 @@ async fn main() {
         port,
         bind_addr: "127.0.0.1".to_string(),
     };
-    let state = AppState::new(engine, Arc::clone(&stats), config, Some(log_dir));
+    let state = AppState::new(engine, Arc::clone(&stats), config, Some(log_dir), None);
 
     tracing::info!(port, "Test server starting");
 

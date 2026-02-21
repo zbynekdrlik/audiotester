@@ -197,6 +197,10 @@ pub struct AudioEngine {
     rec_sent_consumer: Option<ringbuf::HeapCons<RecordEntry>>,
     /// Consumer for received sample recording (loss verification)
     rec_recv_consumer: Option<ringbuf::HeapCons<RecordEntry>>,
+    /// Signal channel index (0-based). Output: burst signal, Input: burst detection.
+    signal_channel: usize,
+    /// Counter channel index (0-based). Output: frame counter, Input: loss detection.
+    counter_channel: usize,
 }
 
 impl AudioEngine {
@@ -223,6 +227,8 @@ impl AudioEngine {
             counter_buffer: Vec::new(),
             rec_sent_consumer: None,
             rec_recv_consumer: None,
+            signal_channel: 0,
+            counter_channel: 1,
         }
     }
 
@@ -241,6 +247,39 @@ impl AudioEngine {
         if (8000..=384000).contains(&rate) {
             self.sample_rate = rate;
         }
+    }
+
+    /// Set the channel pair for signal and counter (1-based indices).
+    ///
+    /// Validates that both channels are non-zero and different.
+    /// Converts to 0-based internally.
+    pub fn set_channel_pair(&mut self, pair: [u16; 2]) -> Result<()> {
+        if pair[0] == 0 || pair[1] == 0 {
+            return Err(anyhow!("Channel indices must be 1-based (non-zero)"));
+        }
+        if pair[0] == pair[1] {
+            return Err(anyhow!(
+                "Signal and counter channels must be different (got {} and {})",
+                pair[0],
+                pair[1]
+            ));
+        }
+        self.signal_channel = (pair[0] - 1) as usize;
+        self.counter_channel = (pair[1] - 1) as usize;
+        tracing::info!(
+            signal = pair[0],
+            counter = pair[1],
+            "Channel pair configured"
+        );
+        Ok(())
+    }
+
+    /// Get the current channel pair as 1-based indices
+    pub fn channel_pair(&self) -> [u16; 2] {
+        [
+            (self.signal_channel + 1) as u16,
+            (self.counter_channel + 1) as u16,
+        ]
     }
 
     /// Get the ASIO host
@@ -408,6 +447,31 @@ impl AudioEngine {
             input_channels
         );
 
+        // Validate channel pair against device capabilities
+        let sig_ch = self.signal_channel;
+        let cnt_ch = self.counter_channel;
+        if sig_ch >= output_channels as usize || cnt_ch >= output_channels as usize {
+            return Err(anyhow!(
+                "Channel pair [{}, {}] exceeds output channel count {}",
+                sig_ch + 1,
+                cnt_ch + 1,
+                output_channels
+            ));
+        }
+        if sig_ch >= input_channels as usize || cnt_ch >= input_channels as usize {
+            return Err(anyhow!(
+                "Channel pair [{}, {}] exceeds input channel count {}",
+                sig_ch + 1,
+                cnt_ch + 1,
+                input_channels
+            ));
+        }
+        tracing::info!(
+            signal_channel = sig_ch + 1,
+            counter_channel = cnt_ch + 1,
+            "Using channel pair (1-based)"
+        );
+
         // Try configured rate first, fall back to device default if it fails
         let rates_to_try = if device_rate != actual_sample_rate {
             vec![actual_sample_rate, device_rate]
@@ -509,6 +573,8 @@ impl AudioEngine {
         let output_buf_size = Arc::clone(&buffer_size_frames);
         let output_sample_count = Arc::clone(&output_samples);
         let num_output_channels = output_channels as usize;
+        let out_sig_ch = sig_ch;
+        let out_cnt_ch = cnt_ch;
         let output_stream = device.build_output_stream(
             &output_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -517,10 +583,13 @@ impl AudioEngine {
                     let mut frame_count = 0usize;
 
                     for (i, frame) in data.chunks_mut(num_output_channels).enumerate() {
-                        // Channel 0: Burst signal (generator owned by this closure)
+                        // Silence all channels first
+                        frame.fill(0.0);
+
+                        // Signal channel: Burst signal (generator owned by this closure)
                         let (sample, is_burst_start) = burst_gen.next_sample();
-                        if !frame.is_empty() {
-                            frame[0] = sample;
+                        if out_sig_ch < frame.len() {
+                            frame[out_sig_ch] = sample;
                         }
 
                         // Send burst event via lock-free crossbeam channel
@@ -530,10 +599,10 @@ impl AudioEngine {
                             });
                         }
 
-                        // Channel 1: Frame counter as normalized sawtooth (0.0 to 1.0)
-                        if frame.len() > 1 {
+                        // Counter channel: Frame counter as normalized sawtooth (0.0 to 1.0)
+                        if out_cnt_ch < frame.len() {
                             let counter = (start_counter + i as u64) & 0xFFFF;
-                            frame[1] = (counter as f32) / 65536.0;
+                            frame[out_cnt_ch] = (counter as f32) / 65536.0;
                             // Record sent counter for loss verification
                             let _ = rec_sent_producer.try_push(RecordEntry {
                                 counter: counter as u16,
@@ -541,10 +610,6 @@ impl AudioEngine {
                             });
                         }
 
-                        // Fill remaining channels with silence
-                        for ch in frame.iter_mut().skip(2) {
-                            *ch = 0.0;
-                        }
                         frame_count += 1;
                     }
 
@@ -555,11 +620,13 @@ impl AudioEngine {
                         // Record ASIO buffer size from first callback
                         output_buf_size.store(frame_count as u32, Ordering::Relaxed);
                         tracing::info!(
-                            "Output callback started: {} frames ({} channels), burst mode, ch0={:.4}, ch1={:.4}",
+                            "Output callback started: {} frames ({} channels), burst mode, sig_ch={} cnt_ch={}, ch[sig]={:.4}, ch[cnt]={:.4}",
                             frame_count,
                             num_output_channels,
-                            data.first().copied().unwrap_or(0.0),
-                            data.get(1).copied().unwrap_or(0.0)
+                            out_sig_ch + 1,
+                            out_cnt_ch + 1,
+                            data.get(out_sig_ch).copied().unwrap_or(0.0),
+                            data.get(out_cnt_ch).copied().unwrap_or(0.0)
                         );
                     }
                 } else {
@@ -588,6 +655,8 @@ impl AudioEngine {
         let input_shared_counter = Arc::clone(&shared_frame_counter);
         let input_sample_count = Arc::clone(&input_samples);
         let num_input_channels = input_channels as usize;
+        let in_sig_ch = sig_ch;
+        let in_cnt_ch = cnt_ch;
 
         let input_stream = device.build_input_stream(
             &input_config,
@@ -601,8 +670,9 @@ impl AudioEngine {
 
                     // Inline burst detection (detector owned by this closure, no Mutex)
                     for (i, frame) in data.chunks(num_input_channels).enumerate() {
-                        if !frame.is_empty() {
-                            let sample = frame[0];
+                        // Signal channel: burst detection
+                        if in_sig_ch < frame.len() {
+                            let sample = frame[in_sig_ch];
 
                             if burst_detector.process(sample, i).is_some() {
                                 let _ = detection_event_tx.try_send(DetectionEvent {
@@ -611,11 +681,12 @@ impl AudioEngine {
                             }
                         }
 
-                        // Counter ring buffer for loss detection (producer owned, no Mutex)
-                        if frame.len() > 1 {
-                            let _ = counter_producer.try_push(frame[1]);
+                        // Counter channel: ring buffer for loss detection (producer owned, no Mutex)
+                        if in_cnt_ch < frame.len() {
+                            let _ = counter_producer.try_push(frame[in_cnt_ch]);
                             // Record received counter for loss verification
-                            let raw_counter = ((frame[1] * 65536.0).round() as u32) & 0xFFFF;
+                            let raw_counter =
+                                ((frame[in_cnt_ch] * 65536.0).round() as u32) & 0xFFFF;
                             let _ = rec_recv_producer.try_push(RecordEntry {
                                 counter: raw_counter as u16,
                                 frame_index: current_shared_frame + i as u64,
@@ -625,22 +696,24 @@ impl AudioEngine {
 
                     let prev = input_sample_count.fetch_add(frame_count, Ordering::Relaxed);
                     if prev == 0 {
-                        let max_level_ch0 = data
+                        let max_level_sig = data
                             .chunks(num_input_channels)
-                            .filter_map(|f| f.first())
+                            .filter_map(|f| f.get(in_sig_ch))
                             .map(|x| x.abs())
                             .fold(0.0f32, f32::max);
-                        let max_level_ch1 = data
+                        let max_level_cnt = data
                             .chunks(num_input_channels)
-                            .filter_map(|f| f.get(1))
+                            .filter_map(|f| f.get(in_cnt_ch))
                             .map(|x| x.abs())
                             .fold(0.0f32, f32::max);
                         tracing::info!(
-                            "Input callback started: {} frames ({} channels), ch0 max: {:.4}, ch1 max: {:.4}",
+                            "Input callback started: {} frames ({} channels), sig_ch={} cnt_ch={}, ch[sig] max: {:.4}, ch[cnt] max: {:.4}",
                             frame_count,
                             num_input_channels,
-                            max_level_ch0,
-                            max_level_ch1
+                            in_sig_ch + 1,
+                            in_cnt_ch + 1,
+                            max_level_sig,
+                            max_level_cnt
                         );
                     }
                 }
@@ -959,6 +1032,35 @@ mod tests {
                 println!("No audio devices available: {}", e);
             }
         }
+    }
+
+    #[test]
+    fn test_channel_pair_default() {
+        let engine = AudioEngine::new();
+        assert_eq!(engine.channel_pair(), [1, 2]);
+    }
+
+    #[test]
+    fn test_set_channel_pair() {
+        let mut engine = AudioEngine::new();
+        engine.set_channel_pair([127, 128]).unwrap();
+        assert_eq!(engine.channel_pair(), [127, 128]);
+        assert_eq!(engine.signal_channel, 126);
+        assert_eq!(engine.counter_channel, 127);
+    }
+
+    #[test]
+    fn test_set_channel_pair_zero_rejected() {
+        let mut engine = AudioEngine::new();
+        assert!(engine.set_channel_pair([0, 1]).is_err());
+        assert!(engine.set_channel_pair([1, 0]).is_err());
+    }
+
+    #[test]
+    fn test_set_channel_pair_same_rejected() {
+        let mut engine = AudioEngine::new();
+        assert!(engine.set_channel_pair([1, 1]).is_err());
+        assert!(engine.set_channel_pair([5, 5]).is_err());
     }
 
     #[test]
