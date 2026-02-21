@@ -125,4 +125,34 @@ test.describe("Latency Timeline UI", () => {
     await expect(btn14d).toHaveClass(/active/);
     await expect(btn1h).not.toHaveClass(/active/);
   });
+
+  test("Live button is visible on latency timeline", async ({ page }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#latency-live-btn");
+    await expect(liveBtn).toBeVisible();
+    await expect(liveBtn).toHaveText("Live");
+  });
+
+  test("Live button is active by default on latency timeline", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#latency-live-btn");
+    await expect(liveBtn).toHaveClass(/active/);
+  });
+
+  test("clicking Live button adds active class on latency timeline", async ({
+    page,
+  }) => {
+    await page.goto("/");
+    const liveBtn = page.locator("#latency-live-btn");
+
+    // Remove active class first by simulating what pan detection would do
+    await liveBtn.evaluate((el) => el.classList.remove("active"));
+    await expect(liveBtn).not.toHaveClass(/active/);
+
+    // Click should re-activate
+    await liveBtn.click();
+    await expect(liveBtn).toHaveClass(/active/);
+  });
 });
