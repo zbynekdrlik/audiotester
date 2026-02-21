@@ -15,13 +15,15 @@ use ringbuf::traits::{Consumer, Observer};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Handle returned by [`SampleRecorder::start`] to stop recording
 pub struct RecorderHandle {
     stop_flag: Arc<AtomicBool>,
+    /// Total records written (sent + recv), updated by recorder thread
+    records_written: Arc<AtomicU64>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -32,6 +34,19 @@ impl RecorderHandle {
         if let Some(h) = self.thread.take() {
             let _ = h.join();
         }
+    }
+
+    /// Check if the recorder thread is still alive
+    pub fn is_alive(&self) -> bool {
+        self.thread
+            .as_ref()
+            .map(|h| !h.is_finished())
+            .unwrap_or(false)
+    }
+
+    /// Total records written so far (sent + recv)
+    pub fn records_written(&self) -> u64 {
+        self.records_written.load(Ordering::Relaxed)
     }
 }
 
@@ -66,16 +81,34 @@ impl SampleRecorder {
     ) -> RecorderHandle {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let flag_clone = Arc::clone(&stop_flag);
+        let records_written = Arc::new(AtomicU64::new(0));
+        let records_clone = Arc::clone(&records_written);
 
         let thread = std::thread::Builder::new()
             .name("sample-recorder".into())
             .spawn(move || {
-                self.recording_loop(sent_consumer, recv_consumer, flag_clone);
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    self.recording_loop(sent_consumer, recv_consumer, flag_clone, records_clone);
+                }));
+                match result {
+                    Ok(()) => tracing::info!("Sample recorder thread exited normally"),
+                    Err(panic_info) => {
+                        let msg = if let Some(s) = panic_info.downcast_ref::<&str>() {
+                            s.to_string()
+                        } else if let Some(s) = panic_info.downcast_ref::<String>() {
+                            s.clone()
+                        } else {
+                            "unknown panic".to_string()
+                        };
+                        tracing::error!(panic = %msg, "Sample recorder thread PANICKED");
+                    }
+                }
             })
             .expect("Failed to spawn sample recorder thread");
 
         RecorderHandle {
             stop_flag,
+            records_written,
             thread: Some(thread),
         }
     }
@@ -85,6 +118,7 @@ impl SampleRecorder {
         mut sent_consumer: ringbuf::HeapCons<RecordEntry>,
         mut recv_consumer: ringbuf::HeapCons<RecordEntry>,
         stop_flag: Arc<AtomicBool>,
+        records_written: Arc<AtomicU64>,
     ) {
         // Ensure recording directory exists
         if let Err(e) = fs::create_dir_all(&self.dir) {
@@ -92,19 +126,19 @@ impl SampleRecorder {
             return;
         }
 
-        tracing::info!(dir = %self.dir.display(), "Sample recorder started");
+        tracing::info!(dir = %self.dir.display(), "Sample recorder thread running");
 
         let mut sent_buf = vec![
             RecordEntry {
                 counter: 0,
-                frame_index: 0
+                frame_index: 0,
             };
             4096
         ];
         let mut recv_buf = vec![
             RecordEntry {
                 counter: 0,
-                frame_index: 0
+                frame_index: 0,
             };
             4096
         ];
@@ -112,6 +146,9 @@ impl SampleRecorder {
         let mut sent_writer: Option<BufWriter<File>> = None;
         let mut recv_writer: Option<BufWriter<File>> = None;
         let mut file_opened_at = std::time::Instant::now();
+        let mut total_sent: u64 = 0;
+        let mut total_recv: u64 = 0;
+        let mut stats_logged_at = std::time::Instant::now();
 
         // Open initial files
         if let Some((sw, rw)) = self.open_file_pair() {
@@ -132,10 +169,17 @@ impl SampleRecorder {
                 let read = sent_consumer.pop_slice(&mut sent_buf[..to_read]);
                 if let Some(ref mut w) = sent_writer {
                     for entry in &sent_buf[..read] {
-                        let _ = w.write_all(&entry.counter.to_le_bytes());
-                        let _ = w.write_all(&entry.frame_index.to_le_bytes());
+                        if let Err(e) = w.write_all(&entry.counter.to_le_bytes()) {
+                            tracing::error!(error = %e, "Failed to write sent record");
+                            break;
+                        }
+                        if let Err(e) = w.write_all(&entry.frame_index.to_le_bytes()) {
+                            tracing::error!(error = %e, "Failed to write sent record frame_index");
+                            break;
+                        }
                     }
                 }
+                total_sent += read as u64;
             }
 
             // Drain recv ring buffer
@@ -145,29 +189,65 @@ impl SampleRecorder {
                 let read = recv_consumer.pop_slice(&mut recv_buf[..to_read]);
                 if let Some(ref mut w) = recv_writer {
                     for entry in &recv_buf[..read] {
-                        let _ = w.write_all(&entry.counter.to_le_bytes());
-                        let _ = w.write_all(&entry.frame_index.to_le_bytes());
+                        if let Err(e) = w.write_all(&entry.counter.to_le_bytes()) {
+                            tracing::error!(error = %e, "Failed to write recv record");
+                            break;
+                        }
+                        if let Err(e) = w.write_all(&entry.frame_index.to_le_bytes()) {
+                            tracing::error!(error = %e, "Failed to write recv record frame_index");
+                            break;
+                        }
                     }
                 }
+                total_recv += read as u64;
+            }
+
+            // Update shared counter
+            records_written.store(total_sent + total_recv, Ordering::Relaxed);
+
+            // Log stats every 60 seconds
+            if stats_logged_at.elapsed() >= Duration::from_secs(60) {
+                tracing::info!(
+                    sent = total_sent,
+                    recv = total_recv,
+                    has_sent_writer = sent_writer.is_some(),
+                    has_recv_writer = recv_writer.is_some(),
+                    file_age_secs = file_opened_at.elapsed().as_secs(),
+                    "Recorder stats"
+                );
+                stats_logged_at = std::time::Instant::now();
             }
 
             // Rotate files if needed
             if file_opened_at.elapsed() >= self.file_duration {
-                // Flush and close current files
-                if let Some(ref mut w) = sent_writer {
-                    let _ = w.flush();
+                tracing::info!(
+                    sent = total_sent,
+                    recv = total_recv,
+                    "Rotating recording files"
+                );
+
+                // Flush current files explicitly before dropping
+                if let Some(mut w) = sent_writer.take() {
+                    if let Err(e) = w.flush() {
+                        tracing::error!(error = %e, "Failed to flush sent file on rotation");
+                    }
                 }
-                if let Some(ref mut w) = recv_writer {
-                    let _ = w.flush();
+                if let Some(mut w) = recv_writer.take() {
+                    if let Err(e) = w.flush() {
+                        tracing::error!(error = %e, "Failed to flush recv file on rotation");
+                    }
                 }
 
                 // Open new files
-                if let Some((sw, rw)) = self.open_file_pair() {
-                    sent_writer = Some(sw);
-                    recv_writer = Some(rw);
-                } else {
-                    sent_writer = None;
-                    recv_writer = None;
+                match self.open_file_pair() {
+                    Some((sw, rw)) => {
+                        sent_writer = Some(sw);
+                        recv_writer = Some(rw);
+                        tracing::info!("New recording files opened after rotation");
+                    }
+                    None => {
+                        tracing::error!("Failed to open new recording files after rotation");
+                    }
                 }
                 file_opened_at = std::time::Instant::now();
 
@@ -180,14 +260,18 @@ impl SampleRecorder {
         }
 
         // Flush on exit
-        if let Some(ref mut w) = sent_writer {
+        if let Some(mut w) = sent_writer.take() {
             let _ = w.flush();
         }
-        if let Some(ref mut w) = recv_writer {
+        if let Some(mut w) = recv_writer.take() {
             let _ = w.flush();
         }
 
-        tracing::info!("Sample recorder stopped");
+        tracing::info!(
+            sent = total_sent,
+            recv = total_recv,
+            "Sample recorder stopped"
+        );
     }
 
     fn open_file_pair(&self) -> Option<(BufWriter<File>, BufWriter<File>)> {
