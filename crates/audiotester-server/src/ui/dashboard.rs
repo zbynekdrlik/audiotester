@@ -91,6 +91,7 @@ fn DashboardPage() -> impl IntoView {
                                     <button class="zoom-btn" data-range="7d">"7d"</button>
                                     <button class="zoom-btn" data-range="14d">"14d"</button>
                                 </div>
+                                <button class="zoom-btn live active" id="loss-live-btn">"Live"</button>
                             </div>
                             <div id="loss-timeline" class="chart" data-testid="loss-timeline"></div>
                         </div>
@@ -106,6 +107,7 @@ fn DashboardPage() -> impl IntoView {
                                     <button class="zoom-btn" data-range="7d">"7d"</button>
                                     <button class="zoom-btn" data-range="14d">"14d"</button>
                                 </div>
+                                <button class="zoom-btn live active" id="latency-live-btn">"Live"</button>
                             </div>
                             <div id="latency-chart" class="chart" data-testid="latency-timeline"></div>
                         </div>

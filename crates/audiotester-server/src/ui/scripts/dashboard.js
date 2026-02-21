@@ -129,6 +129,8 @@
   var lossTimelineRange = "1h";
   var lossRefreshTimer = null;
   var lastTotalLost = 0;
+  var lossLiveMode = true;
+  var lossUpdating = false;
 
   function initLossTimeline() {
     var container = document.getElementById("loss-timeline");
@@ -231,6 +233,27 @@
       });
     }).observe(container);
 
+    // Detect manual panning to disable live mode
+    lossChart.timeScale().subscribeVisibleLogicalRangeChange(function () {
+      if (!lossUpdating && lossLiveMode) {
+        lossLiveMode = false;
+        var btn = document.getElementById("loss-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+
+    // Live button handler
+    var lossLiveBtn = document.getElementById("loss-live-btn");
+    if (lossLiveBtn) {
+      lossLiveBtn.addEventListener("click", function () {
+        lossLiveMode = true;
+        lossLiveBtn.classList.add("active");
+        if (lossChart) {
+          lossChart.timeScale().scrollToRealTime();
+        }
+      });
+    }
+
     // Setup zoom button handlers
     var zoomControls = document.getElementById("loss-zoom-controls");
     if (zoomControls) {
@@ -294,7 +317,12 @@
           chartData.push({ time: nowLocal, value: 0, color: "transparent" });
         }
 
+        lossUpdating = true;
         lossHistogram.setData(chartData);
+        lossUpdating = false;
+        if (lossLiveMode) {
+          lossChart.timeScale().scrollToRealTime();
+        }
 
         // Add "Now" marker at the current time position
         var markerTime =
@@ -331,6 +359,8 @@
   var latencyMarkers = null;
   var latencyTimelineRange = "1h";
   var latencyRefreshTimer = null;
+  var latencyLiveMode = true;
+  var latencyUpdating = false;
 
   function initLatencyTimeline() {
     var container = document.getElementById("latency-chart");
@@ -369,6 +399,12 @@
           return price.toFixed(1) + " ms";
         },
         minMove: 0.1,
+      },
+      autoscaleInfoProvider: function () {
+        return {
+          priceRange: { minValue: null, maxValue: null },
+          margins: { above: 0.1, below: 0.1 },
+        };
       },
     });
 
@@ -424,6 +460,27 @@
       });
     }).observe(container);
 
+    // Detect manual panning to disable live mode
+    latencyChart.timeScale().subscribeVisibleLogicalRangeChange(function () {
+      if (!latencyUpdating && latencyLiveMode) {
+        latencyLiveMode = false;
+        var btn = document.getElementById("latency-live-btn");
+        if (btn) btn.classList.remove("active");
+      }
+    });
+
+    // Live button handler
+    var latencyLiveBtn = document.getElementById("latency-live-btn");
+    if (latencyLiveBtn) {
+      latencyLiveBtn.addEventListener("click", function () {
+        latencyLiveMode = true;
+        latencyLiveBtn.classList.add("active");
+        if (latencyChart) {
+          latencyChart.timeScale().scrollToRealTime();
+        }
+      });
+    }
+
     // Setup zoom button handlers
     var zoomControls = document.getElementById("latency-zoom-controls");
     if (zoomControls) {
@@ -473,7 +530,12 @@
             };
           });
 
+        latencyUpdating = true;
         latencyLine.setData(chartData);
+        latencyUpdating = false;
+        if (latencyLiveMode) {
+          latencyChart.timeScale().scrollToRealTime();
+        }
 
         // Add "Now" marker on the last data point
         if (chartData.length > 0) {
