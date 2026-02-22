@@ -18,6 +18,7 @@ fn SettingsPage() -> impl IntoView {
                 <meta charset="utf-8"/>
                 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
                 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:;"/>
+                <link rel="icon" type="image/x-icon" href="/favicon.ico"/>
                 <title>"Audiotester - Settings"</title>
                 <style>{SETTINGS_STYLES}</style>
             </head>
@@ -49,6 +50,25 @@ fn SettingsPage() -> impl IntoView {
                                 <option value="192000">"192000 Hz"</option>
                             </select>
                         </div>
+                    </section>
+                    <section class="settings-section">
+                        <h2>"Channel Pair"</h2>
+                        <p class="channel-pair-description">"Select which channels carry the test signal and frame counter (1-based)."</p>
+                        <div class="channel-pair-row">
+                            <div class="form-group">
+                                <label for="signal-channel">"Signal Channel"</label>
+                                <select id="signal-channel" class="channel-select" aria-label="Signal Channel">
+                                    <option value="1">"1"</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label for="counter-channel">"Counter Channel"</label>
+                                <select id="counter-channel" class="channel-select" aria-label="Counter Channel">
+                                    <option value="2">"2"</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div id="channel-error" class="channel-error" style="display:none"></div>
                     </section>
                     <section class="settings-section">
                         <h2>"Monitoring"</h2>

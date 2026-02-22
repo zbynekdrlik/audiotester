@@ -81,6 +81,7 @@ pub struct ConfigResponse {
     pub device: Option<String>,
     pub sample_rate: u32,
     pub monitoring: bool,
+    pub channel_pair: [u16; 2],
 }
 
 /// Configuration update request
@@ -88,6 +89,7 @@ pub struct ConfigResponse {
 pub struct ConfigUpdate {
     pub device: Option<String>,
     pub sample_rate: Option<u32>,
+    pub channel_pair: Option<[u16; 2]>,
 }
 
 /// Remote URL response
@@ -233,6 +235,7 @@ pub async fn get_config(
         device: status.device_name,
         sample_rate: status.sample_rate,
         monitoring: status.state == EngineState::Running,
+        channel_pair: status.channel_pair,
     }))
 }
 
@@ -249,6 +252,29 @@ pub async fn update_config(
             ));
         }
         state.engine.set_sample_rate(rate).await;
+    }
+
+    if let Some(ref pair) = update.channel_pair {
+        if pair[0] == 0 || pair[1] == 0 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "Channel indices must be 1-based (non-zero)".to_string(),
+            ));
+        }
+        if pair[0] == pair[1] {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Signal and counter channels must be different (got {} and {})",
+                    pair[0], pair[1]
+                ),
+            ));
+        }
+        state
+            .engine
+            .set_channel_pair(*pair)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
     }
 
     if let Some(ref device) = update.device {
@@ -280,16 +306,30 @@ pub async fn update_config(
             })?;
     }
 
+    // Get final status after all changes
     let status = state
         .engine
         .get_status()
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
+    // Save config to disk if config_path is set
+    if let Some(ref config_path) = state.config_path {
+        let app_config = crate::AppConfig {
+            device: status.device_name.clone(),
+            sample_rate: status.sample_rate,
+            channel_pair: status.channel_pair,
+        };
+        if let Err(e) = app_config.save(config_path) {
+            tracing::warn!(error = %e, "Failed to save config to disk");
+        }
+    }
+
     Ok(Json(ConfigResponse {
         device: status.device_name,
         sample_rate: status.sample_rate,
         monitoring: status.state == EngineState::Running,
+        channel_pair: status.channel_pair,
     }))
 }
 
@@ -401,7 +441,7 @@ pub async fn toggle_monitoring(
 /// Query parameters for GET /api/v1/loss-timeline
 #[derive(Deserialize)]
 pub struct LossTimelineQuery {
-    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
+    /// Time range: "10m", "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
     pub range: Option<String>,
     /// Bucket size in seconds (default: auto based on range)
     pub bucket_size: Option<i64>,
@@ -438,6 +478,7 @@ pub async fn get_loss_timeline(
     let range_str = query.range.as_deref().unwrap_or("14d");
 
     let range_secs: i64 = match range_str {
+        "10m" => 600,
         "1h" => 3600,
         "6h" => 21600,
         "12h" => 43200,
@@ -451,6 +492,7 @@ pub async fn get_loss_timeline(
     let bucket_size = query
         .bucket_size
         .unwrap_or(match range_str {
+            "10m" => 10,
             "1h" => 10,
             "6h" => 60,
             "12h" => 120,
@@ -480,7 +522,7 @@ pub async fn get_loss_timeline(
 /// Query parameters for GET /api/v1/latency-timeline
 #[derive(Deserialize)]
 pub struct LatencyTimelineQuery {
-    /// Time range: "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
+    /// Time range: "10m", "1h", "6h", "12h", "24h", "3d", "7d", "14d" (default: "14d")
     pub range: Option<String>,
     /// Bucket size in seconds (default: auto based on range)
     pub bucket_size: Option<i64>,
@@ -519,6 +561,7 @@ pub async fn get_latency_timeline(
     let range_str = query.range.as_deref().unwrap_or("14d");
 
     let range_secs: i64 = match range_str {
+        "10m" => 600,
         "1h" => 3600,
         "6h" => 21600,
         "12h" => 43200,
@@ -531,6 +574,7 @@ pub async fn get_latency_timeline(
     let bucket_size = query
         .bucket_size
         .unwrap_or(match range_str {
+            "10m" => 10,
             "1h" => 10,
             "6h" => 60,
             "12h" => 120,
@@ -671,6 +715,7 @@ mod tests {
         let update: ConfigUpdate = serde_json::from_str(json).unwrap();
         assert_eq!(update.device, Some("Test Device".to_string()));
         assert_eq!(update.sample_rate, Some(48000));
+        assert_eq!(update.channel_pair, None);
     }
 
     #[test]
@@ -679,5 +724,13 @@ mod tests {
         let update: ConfigUpdate = serde_json::from_str(json).unwrap();
         assert_eq!(update.device, None);
         assert_eq!(update.sample_rate, Some(48000));
+        assert_eq!(update.channel_pair, None);
+    }
+
+    #[test]
+    fn test_config_update_with_channel_pair() {
+        let json = r#"{"channel_pair": [127, 128]}"#;
+        let update: ConfigUpdate = serde_json::from_str(json).unwrap();
+        assert_eq!(update.channel_pair, Some([127, 128]));
     }
 }

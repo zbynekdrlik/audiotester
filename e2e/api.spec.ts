@@ -50,8 +50,11 @@ test.describe("REST API", () => {
     const body = await resp.json();
     expect(body).toHaveProperty("sample_rate");
     expect(body).toHaveProperty("monitoring");
+    expect(body).toHaveProperty("channel_pair");
     expect(typeof body.sample_rate).toBe("number");
     expect(typeof body.monitoring).toBe("boolean");
+    expect(Array.isArray(body.channel_pair)).toBe(true);
+    expect(body.channel_pair).toHaveLength(2);
   });
 
   test("PATCH /api/v1/config updates sample rate", async ({ request }) => {
@@ -79,5 +82,33 @@ test.describe("REST API", () => {
     const resp = await request.get("/api/v1/ws");
     // WebSocket endpoint returns non-200 for regular HTTP, but not 404
     expect(resp.status()).not.toBe(404);
+  });
+
+  test("PATCH /api/v1/config updates channel pair", async ({ request }) => {
+    const resp = await request.patch("/api/v1/config", {
+      data: { channel_pair: [3, 4] },
+    });
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+    expect(body.channel_pair).toEqual([3, 4]);
+
+    // Reset to default
+    await request.patch("/api/v1/config", {
+      data: { channel_pair: [1, 2] },
+    });
+  });
+
+  test("PATCH /api/v1/config rejects zero channel", async ({ request }) => {
+    const resp = await request.patch("/api/v1/config", {
+      data: { channel_pair: [0, 1] },
+    });
+    expect(resp.status()).toBe(400);
+  });
+
+  test("PATCH /api/v1/config rejects same channels", async ({ request }) => {
+    const resp = await request.patch("/api/v1/config", {
+      data: { channel_pair: [1, 1] },
+    });
+    expect(resp.status()).toBe(400);
   });
 });

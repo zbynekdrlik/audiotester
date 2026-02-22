@@ -176,6 +176,43 @@ main {
   color: #e0e0e0;
 }
 
+.channel-pair-description {
+  font-size: 0.85rem;
+  color: #8892b0;
+  margin-bottom: 0.75rem;
+}
+
+.channel-pair-row {
+  display: flex;
+  gap: 1rem;
+}
+
+.channel-pair-row .form-group {
+  flex: 1;
+  max-width: 200px;
+}
+
+.channel-select {
+  width: 100%;
+  padding: 0.6rem;
+  background: #0f1729;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 0.9rem;
+}
+
+.channel-select:focus {
+  outline: none;
+  border-color: #00d4ff;
+}
+
+.channel-error {
+  color: #ff4040;
+  font-size: 0.85rem;
+  margin-top: 0.5rem;
+}
+
 .error-notification {
   position: fixed;
   top: 1rem;

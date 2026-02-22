@@ -25,6 +25,9 @@ pub const LIGHTWEIGHT_CHARTS_SCRIPT: &str =
 /// PWA manifest JSON
 pub const MANIFEST_JSON: &str = include_str!("manifest.json");
 
+/// Favicon for browser tab identification
+pub const FAVICON_ICO: &[u8] = include_bytes!("icons/favicon.ico");
+
 /// Escape </script> tags in embedded content
 pub fn escape_script_tag(s: &str) -> String {
     s.replace("</script>", r#"<\/script>"#)

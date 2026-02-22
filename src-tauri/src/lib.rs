@@ -3,8 +3,10 @@
 //! Desktop shell providing tray icon, window, and NSIS installer.
 //! All UI is served by the embedded Axum + Leptos SSR server.
 
+pub mod config;
 pub mod tray;
 
+use audiotester_core::audio::recorder::{RecorderHandle, SampleRecorder};
 use audiotester_core::stats::store::StatsStore;
 use audiotester_server::{AppState, EngineHandle, ServerConfig};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -76,7 +78,14 @@ pub fn run() {
     let stats = Arc::new(Mutex::new(StatsStore::new()));
 
     let config = ServerConfig::default();
-    let state = AppState::new(engine.clone(), Arc::clone(&stats), config, Some(log_dir));
+    let config_path = config::AppConfig::path();
+    let state = AppState::new(
+        engine.clone(),
+        Arc::clone(&stats),
+        config,
+        Some(log_dir),
+        Some(config_path),
+    );
 
     // Single Tokio runtime for all async tasks
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
@@ -90,13 +99,14 @@ pub fn run() {
         }
     });
 
-    // Spawn auto-configure if env vars are set
-    if std::env::var("AUDIOTESTER_DEVICE").is_ok()
-        || std::env::var("AUDIOTESTER_AUTO_START").is_ok()
-    {
+    // Load saved config and spawn auto-configure
+    let saved_config = config::AppConfig::load();
+    let has_env_config = std::env::var("AUDIOTESTER_DEVICE").is_ok()
+        || std::env::var("AUDIOTESTER_AUTO_START").is_ok();
+    if has_env_config || saved_config.device.is_some() {
         let auto_engine = engine.clone();
         rt_handle.spawn(async move {
-            auto_configure(auto_engine).await;
+            auto_configure(auto_engine, saved_config).await;
         });
     }
 
@@ -161,31 +171,56 @@ pub fn run() {
         .expect("error while running Audiotester");
 }
 
-/// Auto-configure the engine from environment variables.
+/// Auto-configure the engine from saved config and/or environment variables.
 ///
-/// Reads `AUDIOTESTER_DEVICE`, `AUDIOTESTER_SAMPLE_RATE`, and
-/// `AUDIOTESTER_AUTO_START` to set up the audio engine without
-/// manual web UI interaction.
-async fn auto_configure(engine: EngineHandle) {
+/// Priority: environment variables override saved config (backward compat for CI).
+/// If a device is present (from either source), implies auto-start.
+async fn auto_configure(engine: EngineHandle, saved_config: config::AppConfig) {
     // Wait for ASIO subsystem to initialize after boot/reboot.
     // VBMatrix may take 30-60s to fully start after Windows login.
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    // Set sample rate if specified (trim to handle batch file whitespace)
-    if let Ok(rate_str) = std::env::var("AUDIOTESTER_SAMPLE_RATE") {
+    // Determine effective sample rate: env var overrides saved config
+    let sample_rate = if let Ok(rate_str) = std::env::var("AUDIOTESTER_SAMPLE_RATE") {
         let trimmed = rate_str.trim();
-        if let Ok(rate) = trimmed.parse::<u32>() {
-            tracing::info!(sample_rate = rate, "Auto-configuring sample rate");
-            engine.set_sample_rate(rate).await;
+        match trimmed.parse::<u32>() {
+            Ok(rate) => {
+                tracing::info!(sample_rate = rate, "Sample rate from env var");
+                rate
+            }
+            Err(_) => {
+                tracing::warn!(value = %rate_str, "Invalid AUDIOTESTER_SAMPLE_RATE, using saved config");
+                saved_config.sample_rate
+            }
+        }
+    } else {
+        saved_config.sample_rate
+    };
+    engine.set_sample_rate(sample_rate).await;
+
+    // Apply channel pair from saved config
+    let pair = saved_config.channel_pair;
+    if pair[0] > 0 && pair[1] > 0 && pair[0] != pair[1] {
+        if let Err(e) = engine.set_channel_pair(pair).await {
+            tracing::warn!(error = %e, pair = ?pair, "Failed to set saved channel pair");
         } else {
-            tracing::warn!(value = %rate_str, "Invalid AUDIOTESTER_SAMPLE_RATE");
+            tracing::info!(
+                signal = pair[0],
+                counter = pair[1],
+                "Channel pair from config"
+            );
         }
     }
 
-    let device_name = std::env::var("AUDIOTESTER_DEVICE").ok();
+    // Determine effective device: env var overrides saved config
+    let device_name = std::env::var("AUDIOTESTER_DEVICE")
+        .ok()
+        .or(saved_config.device);
+
+    // Env var auto_start, or having a device in config implies auto-start
     let auto_start = std::env::var("AUDIOTESTER_AUTO_START")
         .map(|v| v.trim() == "true" || v.trim() == "1")
-        .unwrap_or(false);
+        .unwrap_or(true); // Default true when we have a saved device
 
     if let Some(ref device_name) = device_name {
         tracing::info!(device = %device_name, "Auto-configuring device");
@@ -269,6 +304,12 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
     // Counter silence tracking: ch1 muted loopback estimated loss.
     let mut counter_silent_since: Option<std::time::Instant> = None;
     let mut cached_sample_rate: u32 = audiotester_core::DEFAULT_SAMPLE_RATE;
+    // Sample recorder for loss verification (always-on when engine running)
+    let mut recorder_handle: Option<RecorderHandle> = None;
+    let recordings_dir = dirs::data_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join("audiotester")
+        .join("recordings");
 
     // Wait for Tauri APP_HANDLE to be available (event-driven, no polling)
     if APP_HANDLE.get().is_none() {
@@ -317,13 +358,13 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                     last_device_name = engine_status.device_name;
                 }
             }
+        }
 
-            // Update sample counters from engine (cumulative values)
-            if let Ok((sent, received)) = engine.get_sample_counts().await {
-                if let Ok(mut store) = stats.lock() {
-                    store.set_samples_sent(sent as u64);
-                    store.set_samples_received(received as u64);
-                }
+        // Update sample counters from engine every cycle (100ms) for smooth display
+        if let Ok((sent, received)) = engine.get_sample_counts().await {
+            if let Ok(mut store) = stats.lock() {
+                store.set_samples_sent(sent as u64);
+                store.set_samples_received(received as u64);
             }
         }
 
@@ -342,6 +383,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
         // When detected, do a full engine restart for clean measurement state.
         if let Ok(true) = engine.is_stream_invalidated().await {
             tracing::warn!("ASIO stream invalidated (driver reset detected), restarting engine");
+
+            // Stop recorder before engine restart
+            if let Some(mut rh) = recorder_handle.take() {
+                rh.stop();
+            }
 
             // Full engine restart: stop → re-select device → start
             if let Err(e) = engine.stop().await {
@@ -424,6 +470,17 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         confidence = %format!("{:.3}", result.confidence),
                         "signal_lost"
                     );
+                }
+
+                // Start sample recorder if not already running
+                if recorder_handle.is_none() {
+                    if let Ok(Some((sent_cons, recv_cons))) =
+                        engine.take_recording_consumers().await
+                    {
+                        let recorder = SampleRecorder::new(recordings_dir.clone());
+                        recorder_handle = Some(recorder.start(sent_cons, recv_cons));
+                        tracing::info!(dir = %recordings_dir.display(), "Sample recorder started");
+                    }
                 }
 
                 // Reset failure counter on successful analysis
@@ -554,6 +611,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
                         "Audio engine error, attempting reconnection"
                     );
 
+                    // Stop recorder before engine reconnect
+                    if let Some(mut rh) = recorder_handle.take() {
+                        rh.stop();
+                    }
+
                     // Update tray to disconnected
                     if last_status != tray::TrayStatus::Disconnected {
                         last_status = tray::TrayStatus::Disconnected;
@@ -626,6 +688,11 @@ async fn monitoring_loop(engine: EngineHandle, stats: Arc<Mutex<StatsStore>>, st
             if let Some(lost_since) = signal_lost_since {
                 if lost_since.elapsed() > Duration::from_secs(10) {
                     tracing::warn!("Signal lost for >10s, attempting ASIO reconnection");
+
+                    // Stop recorder before engine reconnect
+                    if let Some(mut rh) = recorder_handle.take() {
+                        rh.stop();
+                    }
 
                     if last_status != tray::TrayStatus::Disconnected {
                         last_status = tray::TrayStatus::Disconnected;

@@ -13,7 +13,7 @@
       {
         "title": "Audiotester",
         "url": "http://localhost:8920",
-        "width": 800,
+        "width": 960,
         "height": 600,
         "visible": false,
         "resizable": true,

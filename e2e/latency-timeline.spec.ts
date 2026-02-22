@@ -16,7 +16,7 @@ test.describe("Latency Timeline API", () => {
   test("GET /api/v1/latency-timeline accepts range parameter", async ({
     request,
   }) => {
-    const ranges = ["1h", "6h", "12h", "24h", "3d", "7d", "14d"];
+    const ranges = ["10m", "1h", "6h", "12h", "24h", "3d", "7d", "14d"];
     for (const range of ranges) {
       const resp = await request.get(`/api/v1/latency-timeline?range=${range}`);
       expect(resp.ok()).toBeTruthy();
@@ -24,6 +24,15 @@ test.describe("Latency Timeline API", () => {
       expect(body).toHaveProperty("bucket_size_secs");
       expect(body).toHaveProperty("buckets");
     }
+  });
+
+  test("GET /api/v1/latency-timeline 10m range uses 10s buckets", async ({
+    request,
+  }) => {
+    const resp = await request.get("/api/v1/latency-timeline?range=10m");
+    expect(resp.ok()).toBeTruthy();
+    const body = await resp.json();
+    expect(body.bucket_size_secs).toBe(10);
   });
 
   test("GET /api/v1/latency-timeline 1h range uses 10s buckets", async ({
@@ -86,18 +95,19 @@ test.describe("Latency Timeline UI", () => {
     const controls = page.locator("#latency-zoom-controls");
     await expect(controls).toBeVisible();
 
-    // Verify all seven zoom buttons exist
+    // Verify all eight zoom buttons exist
     const buttons = controls.locator(".zoom-btn");
-    await expect(buttons).toHaveCount(7);
+    await expect(buttons).toHaveCount(8);
 
     // Verify button labels
-    await expect(buttons.nth(0)).toHaveText("1h");
-    await expect(buttons.nth(1)).toHaveText("6h");
-    await expect(buttons.nth(2)).toHaveText("12h");
-    await expect(buttons.nth(3)).toHaveText("24h");
-    await expect(buttons.nth(4)).toHaveText("3d");
-    await expect(buttons.nth(5)).toHaveText("7d");
-    await expect(buttons.nth(6)).toHaveText("14d");
+    await expect(buttons.nth(0)).toHaveText("10m");
+    await expect(buttons.nth(1)).toHaveText("1h");
+    await expect(buttons.nth(2)).toHaveText("6h");
+    await expect(buttons.nth(3)).toHaveText("12h");
+    await expect(buttons.nth(4)).toHaveText("24h");
+    await expect(buttons.nth(5)).toHaveText("3d");
+    await expect(buttons.nth(6)).toHaveText("7d");
+    await expect(buttons.nth(7)).toHaveText("14d");
   });
 
   test("1h zoom button is active by default on latency timeline", async ({

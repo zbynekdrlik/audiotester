@@ -7,17 +7,44 @@ pub mod api;
 pub mod ui;
 pub mod ws;
 
-use audiotester_core::audio::engine::{AnalysisResult, AudioEngine, DeviceInfo, EngineState};
+use audiotester_core::audio::engine::{
+    AnalysisResult, AudioEngine, DeviceInfo, EngineState, RecordEntry,
+};
 use audiotester_core::stats::store::StatsStore;
 use axum::http::{header, HeaderValue};
 use axum::response::IntoResponse;
 use axum::Router;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
+
+/// Persistent application configuration for saving to disk
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppConfig {
+    #[serde(default)]
+    pub device: Option<String>,
+    #[serde(default)]
+    pub sample_rate: u32,
+    #[serde(default)]
+    pub channel_pair: [u16; 2],
+}
+
+impl AppConfig {
+    /// Save config to disk, creating parent directories if needed
+    pub fn save(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let json = serde_json::to_string_pretty(self)?;
+        std::fs::write(path, json)?;
+        tracing::info!(path = %path.display(), "Config saved to disk");
+        Ok(())
+    }
+}
 
 /// Commands sent to the engine thread
 pub enum EngineCommand {
@@ -49,6 +76,21 @@ pub enum EngineCommand {
     IsStreamInvalidated {
         reply: oneshot::Sender<bool>,
     },
+    TakeRecordingConsumers {
+        reply: oneshot::Sender<
+            Option<(
+                ringbuf::HeapCons<RecordEntry>,
+                ringbuf::HeapCons<RecordEntry>,
+            )>,
+        >,
+    },
+    SetChannelPair {
+        pair: [u16; 2],
+        reply: oneshot::Sender<anyhow::Result<()>>,
+    },
+    GetChannelPair {
+        reply: oneshot::Sender<[u16; 2]>,
+    },
 }
 
 /// Engine status snapshot (safe to send between threads)
@@ -57,6 +99,7 @@ pub struct EngineStatus {
     pub state: EngineState,
     pub device_name: Option<String>,
     pub sample_rate: u32,
+    pub channel_pair: [u16; 2],
 }
 
 /// Handle to communicate with the engine thread
@@ -95,6 +138,7 @@ impl EngineHandle {
                             state: engine.state(),
                             device_name: engine.device_name().map(|s| s.to_string()),
                             sample_rate: engine.sample_rate(),
+                            channel_pair: engine.channel_pair(),
                         });
                     }
                     EngineCommand::Analyze { reply } => {
@@ -105,6 +149,15 @@ impl EngineHandle {
                     }
                     EngineCommand::IsStreamInvalidated { reply } => {
                         let _ = reply.send(engine.is_stream_invalidated());
+                    }
+                    EngineCommand::TakeRecordingConsumers { reply } => {
+                        let _ = reply.send(engine.take_recording_consumers());
+                    }
+                    EngineCommand::SetChannelPair { pair, reply } => {
+                        let _ = reply.send(engine.set_channel_pair(pair));
+                    }
+                    EngineCommand::GetChannelPair { reply } => {
+                        let _ = reply.send(engine.channel_pair());
                     }
                 }
             }
@@ -187,6 +240,47 @@ impl EngineHandle {
         rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
     }
 
+    /// Take recording consumers for sample recording (loss verification).
+    ///
+    /// Returns the sent and received recording ring buffer consumers.
+    /// Can only be called once after engine start — subsequent calls return None.
+    pub async fn take_recording_consumers(
+        &self,
+    ) -> anyhow::Result<
+        Option<(
+            ringbuf::HeapCons<RecordEntry>,
+            ringbuf::HeapCons<RecordEntry>,
+        )>,
+    > {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::TakeRecordingConsumers { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
+    /// Set the channel pair (1-based indices)
+    pub async fn set_channel_pair(&self, pair: [u16; 2]) -> anyhow::Result<()> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::SetChannelPair { pair, reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?
+    }
+
+    /// Get the current channel pair (1-based indices)
+    pub async fn get_channel_pair(&self) -> anyhow::Result<[u16; 2]> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::GetChannelPair { reply })
+            .await
+            .map_err(|_| anyhow::anyhow!("Engine thread died"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("Engine thread died"))
+    }
+
     /// Check if the ASIO driver sent a stream invalidation (kAsioResetRequest).
     ///
     /// Returns true when the driver has reset and streams need to be rebuilt.
@@ -213,6 +307,8 @@ pub struct AppState {
     pub config: ServerConfig,
     /// Log directory for diagnostic file logging
     pub log_dir: Option<std::path::PathBuf>,
+    /// Config file path for persistent settings (None for test server)
+    pub config_path: Option<std::path::PathBuf>,
 }
 
 /// Server configuration
@@ -240,6 +336,7 @@ impl AppState {
         stats: Arc<Mutex<StatsStore>>,
         config: ServerConfig,
         log_dir: Option<std::path::PathBuf>,
+        config_path: Option<std::path::PathBuf>,
     ) -> Self {
         let (ws_tx, _) = tokio::sync::broadcast::channel(256);
         Self {
@@ -248,6 +345,7 @@ impl AppState {
             ws_tx,
             config,
             log_dir,
+            config_path,
         }
     }
 }
@@ -258,6 +356,11 @@ async fn serve_manifest() -> impl IntoResponse {
         [(header::CONTENT_TYPE, "application/manifest+json")],
         ui::MANIFEST_JSON,
     )
+}
+
+/// Serve the favicon.ico for browser tab identification
+async fn serve_favicon() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "image/x-icon")], ui::FAVICON_ICO)
 }
 
 /// Build the Axum router with all routes
@@ -297,6 +400,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/v1/ws", axum::routing::get(ws::ws_handler))
         // PWA manifest
         .route("/manifest.json", axum::routing::get(serve_manifest))
+        // Favicon
+        .route("/favicon.ico", axum::routing::get(serve_favicon))
         // Static assets (CSS, JS)
         .nest_service("/assets", ServeDir::new("assets"))
         .layer(CorsLayer::permissive())
