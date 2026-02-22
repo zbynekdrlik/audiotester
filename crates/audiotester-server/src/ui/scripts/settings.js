@@ -104,16 +104,20 @@
       deviceInfo.appendChild(p);
       return;
     }
+    var hasDetails = device.output_channels > 0 || device.input_channels > 0;
     var table = document.createElement("table");
-    [
-      ["Name", device.name],
-      ["Input Ch", device.input_channels],
-      ["Output Ch", device.output_channels],
-      [
+    var rows = [["Name", device.name]];
+    if (hasDetails) {
+      rows.push(["Input Ch", device.input_channels]);
+      rows.push(["Output Ch", device.output_channels]);
+      rows.push([
         "Sample Rates",
         device.sample_rates.length > 0 ? device.sample_rates.join(", ") : "N/A",
-      ],
-    ].forEach(function (row) {
+      ]);
+    } else {
+      rows.push(["Status", "Select to load driver and discover capabilities"]);
+    }
+    rows.forEach(function (row) {
       var tr = document.createElement("tr");
       var td1 = document.createElement("td");
       var td2 = document.createElement("td");
@@ -169,6 +173,12 @@
         }),
       });
       if (!resp.ok) throw new Error("Config update failed: " + resp.status);
+
+      // After selecting a new device, re-fetch device list and config
+      // to get updated channel counts (registry-only devices have 0
+      // channels until their ASIO driver is loaded by selecting them)
+      await loadDevices();
+      await loadConfig();
     } catch (e) {
       console.error("Failed to update device:", e);
       loadConfig();

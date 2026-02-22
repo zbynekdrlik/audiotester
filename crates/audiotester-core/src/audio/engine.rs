@@ -302,70 +302,141 @@ impl AudioEngine {
     /// # Returns
     /// Vector of device information for all available ASIO devices
     pub fn list_devices() -> Result<Vec<DeviceInfo>> {
-        let host = Self::get_asio_host()?;
-        let mut devices = Vec::new();
+        // Read ALL ASIO driver names from the Windows registry.
+        // cpal's host.devices() tries to load each driver, but ASIO only
+        // allows one loaded driver at a time — so it silently skips all
+        // drivers except the currently active one.  Registry enumeration
+        // gives us the complete list regardless of which driver is loaded.
+        let all_names = Self::enumerate_asio_registry_names();
 
-        let default_input = host
-            .default_input_device()
-            .map(|d| d.description().ok().map(|desc| desc.name().to_string()));
-        let default_output = host
-            .default_output_device()
-            .map(|d| d.description().ok().map(|desc| desc.name().to_string()));
+        // Try to get detailed info via cpal for the currently loadable device
+        let mut cpal_devices: std::collections::HashMap<String, DeviceInfo> =
+            std::collections::HashMap::new();
+        if let Ok(host) = Self::get_asio_host() {
+            let default_input = host
+                .default_input_device()
+                .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()));
+            let default_output = host
+                .default_output_device()
+                .and_then(|d| d.description().ok().map(|desc| desc.name().to_string()));
 
-        for device in host.devices()? {
-            let name = device
-                .description()
-                .map(|d| d.name().to_string())
-                .unwrap_or_else(|_| "Unknown".to_string());
+            if let Ok(devices) = host.devices() {
+                for device in devices {
+                    let name = match device.description() {
+                        Ok(d) => d.name().to_string(),
+                        Err(_) => continue,
+                    };
 
-            let is_default = default_input
-                .as_ref()
-                .map(|d| d.as_ref() == Some(&name))
-                .unwrap_or(false)
-                || default_output
-                    .as_ref()
-                    .map(|d| d.as_ref() == Some(&name))
-                    .unwrap_or(false);
+                    let is_default = default_input.as_ref() == Some(&name)
+                        || default_output.as_ref() == Some(&name);
 
-            // Get supported configs
-            let input_channels = device
-                .default_input_config()
-                .map(|c| c.channels())
-                .unwrap_or(0);
+                    let input_channels = device
+                        .default_input_config()
+                        .map(|c| c.channels())
+                        .unwrap_or(0);
 
-            let output_channels = device
-                .default_output_config()
-                .map(|c| c.channels())
-                .unwrap_or(0);
+                    let output_channels = device
+                        .default_output_config()
+                        .map(|c| c.channels())
+                        .unwrap_or(0);
 
-            // Common sample rates to check
-            let common_rates = [44100, 48000, 88200, 96000, 176400, 192000];
-            let mut sample_rates = Vec::new();
+                    let common_rates = [44100, 48000, 88200, 96000, 176400, 192000];
+                    let mut sample_rates = Vec::new();
 
-            if let Ok(configs) = device.supported_output_configs() {
-                for config in configs {
-                    for &rate in &common_rates {
-                        if (config.min_sample_rate()..=config.max_sample_rate()).contains(&rate)
-                            && !sample_rates.contains(&rate)
-                        {
-                            sample_rates.push(rate);
+                    if let Ok(configs) = device.supported_output_configs() {
+                        for config in configs {
+                            for &rate in &common_rates {
+                                if (config.min_sample_rate()..=config.max_sample_rate())
+                                    .contains(&rate)
+                                    && !sample_rates.contains(&rate)
+                                {
+                                    sample_rates.push(rate);
+                                }
+                            }
                         }
                     }
+
+                    sample_rates.sort();
+
+                    cpal_devices.insert(
+                        name.clone(),
+                        DeviceInfo {
+                            name,
+                            is_default,
+                            sample_rates,
+                            input_channels,
+                            output_channels,
+                        },
+                    );
                 }
             }
-
-            sample_rates.sort();
-
-            devices.push(DeviceInfo {
-                name,
-                is_default,
-                sample_rates,
-                input_channels,
-                output_channels,
-            });
         }
 
+        // Build final list: use cpal info if available, otherwise name-only from registry
+        let mut devices = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        // Add devices with full info first (from cpal)
+        for (name, info) in &cpal_devices {
+            seen.insert(name.clone());
+            devices.push(info.clone());
+        }
+
+        // Add registry-only devices (not loadable right now)
+        for name in &all_names {
+            if !seen.contains(name) {
+                devices.push(DeviceInfo {
+                    name: name.clone(),
+                    is_default: false,
+                    sample_rates: Vec::new(), // Unknown until selected
+                    input_channels: 0,        // Unknown until selected
+                    output_channels: 0,       // Unknown until selected
+                });
+            }
+        }
+
+        // Sort: devices with channel info first, then alphabetical
+        devices.sort_by(|a, b| {
+            let a_has_info = a.output_channels > 0 || a.input_channels > 0;
+            let b_has_info = b.output_channels > 0 || b.input_channels > 0;
+            b_has_info.cmp(&a_has_info).then(a.name.cmp(&b.name))
+        });
+
         Ok(devices)
+    }
+
+    /// Read ASIO driver names from the Windows registry.
+    ///
+    /// Returns all registered ASIO driver names from `HKLM\SOFTWARE\ASIO`.
+    /// On non-Windows platforms, returns an empty list.
+    fn enumerate_asio_registry_names() -> Vec<String> {
+        #[cfg(target_os = "windows")]
+        {
+            Self::read_asio_registry().unwrap_or_default()
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Windows-specific: read ASIO subkey names from HKLM\SOFTWARE\ASIO
+    #[cfg(target_os = "windows")]
+    fn read_asio_registry() -> Result<Vec<String>> {
+        use winreg::enums::*;
+        use winreg::RegKey;
+
+        let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+        let asio_key = hklm
+            .open_subkey("SOFTWARE\\ASIO")
+            .map_err(|e| anyhow!("Cannot open HKLM\\SOFTWARE\\ASIO: {}", e))?;
+
+        let mut names = Vec::new();
+        for subkey_name in asio_key.enum_keys().filter_map(|k| k.ok()) {
+            names.push(subkey_name);
+        }
+        Ok(names)
     }
 
     /// Select an ASIO device by name
@@ -373,6 +444,12 @@ impl AudioEngine {
     /// # Arguments
     /// * `name` - Name of the ASIO device to use
     pub fn select_device(&mut self, name: &str) -> Result<()> {
+        // Release any existing device/host so the ASIO driver is unloaded.
+        // ASIO only allows one driver loaded at a time — switching from
+        // e.g. VASIO-8 to Yamaha AIC128-D requires dropping the old first.
+        self.device = None;
+        self.host = None;
+
         let host = Self::get_asio_host()?;
 
         let device = host
